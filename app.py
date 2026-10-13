@@ -237,6 +237,14 @@ def upgrade_url(src: str = "api", plan: str = "starter") -> str:
     return f"{_cloud_config.settings.frontend_url}/#/pricing?plan={plan}&src={src}"
 
 
+def request_uses_api_key(request: Request) -> bool:
+    """True when the caller authenticated with an osk_ key (REST, MCP, OAuth
+    clients) rather than a dashboard session."""
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    return token.startswith("osk_") or request.headers.get("X-API-Key", "").startswith("osk_")
+
+
 def payment_required(error: str, message: str, **extra) -> HTTPException:
     """402 an AI agent can act on: ``upgrade_url`` plus the same link inside
     ``message``, since MCP clients and SDKs often surface only the message."""
@@ -1366,7 +1374,8 @@ def _install_drain_signal_handler():
 
 def _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id, watermark,
                            webhook_url=None, webhook_secret=None, base_url=None,
-                           partial=None, source_cap_minutes=None, skip_statics=False):
+                           partial=None, source_cap_minutes=None, skip_statics=False,
+                           via_api_key=False):
     try:
         path = os.path.join(OUTPUT_DIR, job_id, _RESUME_FILE)
         with open(path, "w") as f:
@@ -1390,6 +1399,7 @@ def _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id, water
                 "source_cap_minutes": source_cap_minutes,
                 # The probe's "statics bot-checked for this video" verdict.
                 "skip_statics": bool(skip_statics),
+                "via_api_key": bool(via_api_key),
             }, f)
     except Exception as e:
         print(f"⚠️ Could not write resume manifest for {job_id}: {e}")
@@ -1514,6 +1524,7 @@ def _resume_interrupted_jobs() -> set:
             'webhook_url': m.get("webhook_url"),
             'webhook_secret': m.get("webhook_secret"),
             'base_url': m.get("base_url"),
+            'via_api_key': bool(m.get("via_api_key")),
         }
         _enqueue_job(job_id, int(m.get("priority", 2)))
         resumed += 1
@@ -2019,11 +2030,15 @@ async def _autopilot_job_finished(job_id, job):
 
 async def _notify_clips_ready(job_id):
     """Email the owner when their clips finish — processing takes minutes, so
-    this lets them close the tab. Once per job (email_sent flag)."""
+    this lets them close the tab. Once per job (email_sent flag). Jobs sent
+    with an API key skip it: the caller polls or gets the webhook, and a
+    script running daily would mail its owner on every run."""
     if not BILLING_ENABLED:
         return
     job = jobs.get(job_id) or {}
     if not job.get('user_id') or job.get('status') != 'completed' or job.get('email_sent'):
+        return
+    if job.get('via_api_key'):
         return
     clips = (job.get('result') or {}).get('clips') or []
     if not clips:
@@ -3386,6 +3401,9 @@ async def process_endpoint(
         'base_url': api_base,
         # Read by the ClipsDelivered/JobFailed analytics event (plan).
         'user_plan': user_plan,
+        # API callers poll or get the webhook; the clips-ready email is for
+        # people who left the dashboard tab.
+        'via_api_key': request_uses_api_key(request),
     }
 
     # Persist the owner so recovered jobs keep their multi-tenant guard after a
@@ -3404,7 +3422,8 @@ async def process_endpoint(
                            watermark=jobs[job_id]['watermark'],
                            webhook_url=webhook_url, webhook_secret=webhook_secret,
                            base_url=api_base, partial=partial,
-                           source_cap_minutes=source_cap, skip_statics=skip_statics)
+                           source_cap_minutes=source_cap, skip_statics=skip_statics,
+                           via_api_key=jobs[job_id]['via_api_key'])
 
     _enqueue_job(job_id, priority)
 

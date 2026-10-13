@@ -67,6 +67,10 @@ Fired once per job from `run_job_wrapper` after the R2 archive so the payload ca
 carry durable download links; survives redeploys via the resume manifest.
 `PUBLIC_API_URL` sets the absolute-URL base when behind a proxy.
 
+Jobs sent with an `osk_` key (REST, MCP, OAuth clients) do not trigger the
+clips-ready email: the caller polls or gets the webhook. The job records
+`via_api_key` and the resume manifest carries it.
+
 ## Payment-required errors
 
 Every 402 (`quota_exceeded`, `no_plan`) goes through `app.payment_required`: it adds `upgrade_url` (`/#/pricing?plan=starter&src=api`, which opens the Starter checkout) and repeats the link inside `message`, since MCP clients and SDKs often show only the message. The MCP `get_quota` tool returns the same `upgrade_url` for free or unentitled users, and the server instructions tell the agent to hand that link to the user.
