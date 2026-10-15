@@ -2,8 +2,9 @@
 
 Every file the pipeline and the clip editor write is clean. On the free plan the
 file that is *served* is `wm_<final>`, a copy of the final file with the mark
-burned in (`main.mark_delivery`, the last step after captions, one NVENC pass
-per free clip; the editor endpoints get it from `app._deliver`, decided from the
+burned in (`main.mark_delivery`, the last step after captions; when the hook and
+captions burn in one ffmpeg the copy is a third output of it, `auto_hook_clip(mark=)`,
+and `mark_delivery` only finds it made; the editor endpoints get it from `app._deliver`, decided from the
 caller's plan right now, not from the job's flag, which a restart loses). Both
 twins live on disk and in R2 (`cloud.videos._twins_to_archive`). The mark must
 never be burned into the canonical reframe: every derivative would inherit it

@@ -467,8 +467,30 @@ def _auto_place(video_path, text, target_box_width, hook_filename, font_scale, s
             "y": round(y, 3), "scale": rel}
 
 
+def _finished_before_crash(result, outputs):
+    """True when ffmpeg died on a signal AFTER finishing every output.
+
+    The multi-output hook pass sometimes segfaults while tearing down, after
+    the last trailer is written: each output's final stats line ("muxing
+    overhead", printed once its trailer and faststart rewrite are done) is
+    already on stderr and the files are complete, byte for byte what a clean
+    exit writes. Treating that as a failure re-ran the whole thing as separate
+    passes for nothing. Anything short of every output finished still fails.
+    """
+    if result.returncode >= 0:
+        return False
+    if (result.stderr or b"").count(b"muxing overhead") < len(outputs):
+        return False
+    if not all(os.path.exists(p) and os.path.getsize(p) > 0 for p in outputs):
+        return False
+    print(f"   ℹ️ ffmpeg exited on signal {-result.returncode} after writing all "
+          f"{len(outputs)} outputs — keeping them.")
+    return True
+
+
 def add_hook_to_video(video_path, text, output_path, position="top", font_scale=1.0, duration=None, style="pill",
-                      also=None, font=None, layout_ranges=None, has_captions=True):
+                      also=None, font=None, layout_ranges=None, has_captions=True,
+                      mark=None):
     """
     Overlays text hook onto video.
     position: 'top', 'center', 'bottom', or 'auto' (hook_placement: off the
@@ -484,6 +506,10 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
       ``vf`` applied (the captions), from the same decode. The job pipeline
       needs both files (the editor re-captions from the hooked one), and one
       ffmpeg with two outputs saves a full decode + pass per clip.
+    mark: optional (logo_path, make_filter, path), only with ``also``: ALSO
+      write ``path`` = the captioned picture with the free-plan mark, from the
+      same decode (the served ``wm_`` copy, see main.mark_delivery).
+      ``make_filter(vw, vh, video=, logo=, out=)`` is main.watermark_filter.
     """
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video {video_path} not found")
@@ -546,7 +572,23 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
                    + (f":enable='between(t,0,{float(duration)})'" if duration else ""))
         tail = ['-c:a', 'copy', *video_encode_args(QUALITY), *METADATA_SCRUB,
                 '-movflags', '+faststart']
-        if also:
+        if also and mark:
+            extra_vf, extra_path = also
+            logo_path, make_filter, mark_path = mark
+            marked = make_filter(video_width, video_height, video="[sm]",
+                                 logo="[2:v]", out="[m]")
+            ffmpeg_cmd = [
+                'ffmpeg', '-y',
+                '-i', video_path,
+                '-i', img_path,
+                '-i', logo_path,
+                '-filter_complex',
+                f"{overlay},split=2[h][c];[c]{extra_vf},split=2[s][sm];{marked}",
+                '-map', '[h]', '-map', '0:a?', *tail, output_path,
+                '-map', '[s]', '-map', '0:a?', *tail, extra_path,
+                '-map', '[m]', '-map', '0:a?', *tail, mark_path,
+            ]
+        elif also:
             extra_vf, extra_path = also
             ffmpeg_cmd = [
                 'ffmpeg', '-y',
@@ -566,7 +608,16 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
                 output_path
             ]
         
-        subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1800)
+        outputs = [output_path]
+        if also:
+            outputs.append(also[1])
+            if mark:
+                outputs.append(mark[2])
+        result = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=1800)
+        if result.returncode != 0 and not _finished_before_crash(result, outputs):
+            raise subprocess.CalledProcessError(result.returncode, ffmpeg_cmd,
+                                                result.stdout, result.stderr)
         print(f"✅ Hook added to {output_path}")
         if placed:
             return {"position": "auto", "y": placed["y"], "scale": placed["scale"],

@@ -1276,7 +1276,7 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end, split_ranges=
         return None
 
 
-def auto_hook_clip(clip_path, clip, captions=None):
+def auto_hook_clip(clip_path, clip, captions=None, mark=False):
     """Burn the clip's Gemini hook text as a DERIVED file (AUTO_HOOK=1).
 
     Writes ``hooked_<ts>_<clip filename>`` next to the canonical clip, exactly
@@ -1293,7 +1293,11 @@ def auto_hook_clip(clip_path, clip, captions=None):
     the captioned ``subtitled_<id>_hooked_...`` file is written by the same
     ffmpeg, from the same decode, and its path lands in hook_config under
     "_captioned" (popped by the caller). If that combined pass fails, the hook
-    is burned alone and the caller captions the way it always did."""
+    is burned alone and the caller captions the way it always did.
+
+    ``mark`` (free plan, only with ``captions``): the same ffmpeg also writes
+    the served ``wm_`` copy of the captioned file, so mark_delivery finds it
+    made instead of decoding the captioned file again for its own pass."""
     text = (clip.get('viral_hook_text') or '').strip()
     if not text:
         return None
@@ -1324,9 +1328,15 @@ def auto_hook_clip(clip_path, clip, captions=None):
             vf, generation_id = captions
             captioned = os.path.join(
                 output_dir, f"subtitled_{generation_id}_{os.path.basename(out_path)}")
+            marked = None
+            if mark and os.path.exists(watermark_logo_path()):
+                import watermarked
+                marked = (watermark_logo_path(), watermark_filter,
+                          os.path.join(output_dir, watermarked.marked_name(captioned)))
             try:
                 note(add_hook_to_video(clip_path, text, out_path, duration=seconds,
-                                       style=style, also=(vf, captioned), **place))
+                                       style=style, also=(vf, captioned), mark=marked,
+                                       **place))
                 print(f"   🪝 Hook + 💬 captions burned in one pass ({style}, {seconds:g}s): {text}")
                 return out_path, {**config, "_captioned": captioned}
             except Exception as e:
@@ -1339,8 +1349,10 @@ def auto_hook_clip(clip_path, clip, captions=None):
                     detail = f"exit {e.returncode}: {' | '.join(tail)[-300:]}"
                 print(f"   ⚠️ Combined hook+captions pass failed ({detail}) — "
                       f"burning them one at a time.")
-                if os.path.exists(captioned):
-                    os.remove(captioned)  # never leave a half-written subtitled_ behind
+                # Never leave a half-written subtitled_ (or wm_ copy) behind.
+                for partial in (captioned, marked[2] if marked else None):
+                    if partial and os.path.exists(partial):
+                        os.remove(partial)
         note(add_hook_to_video(clip_path, text, out_path, duration=seconds,
                                style=style, **place))
         print(f"   🪝 Hook burned ({style}, {seconds:g}s): {text}")
@@ -2541,7 +2553,8 @@ if __name__ == '__main__':
                         if (clip.get('viral_hook_text') or '').strip():
                             plan = auto_caption_clip(clip_final_path, transcript, start, end,
                                                      split_ranges=split_ranges, plan_only=True)
-                        hooked = auto_hook_clip(clip_final_path, clip, captions=plan)
+                        hooked = auto_hook_clip(clip_final_path, clip, captions=plan,
+                                                mark=os.environ.get("WATERMARK") == "1")
                         if hooked:
                             deliver_path, clip['auto_hook'] = hooked
                             captioned = clip['auto_hook'].pop("_captioned", None)

@@ -51,8 +51,10 @@ Speed at equal quality:
   chunk per launch.
 - **Blur at quarter size** (`ffmpeg_utils.blurred_backdrop`).
 - **Watermark as a served copy** (`main.mark_delivery`, see `watermark.md`):
-  one NVENC pass per free clip, after captions. It must not ride the reframe
-  encode, which would make it permanent.
+  after captions. It must not ride the reframe encode, which would make it
+  permanent. When the hook and captions burn together the `wm_` copy is a third
+  output of that same ffmpeg (`add_hook_to_video(mark=)`); otherwise
+  `mark_delivery` runs its own pass.
 - **hooked_ + subtitled_ from one ffmpeg** (`hooks.add_hook_to_video(also=)`):
   the editor still needs both files (re-caption walks back to hooked_, hook
   replace to the canonical), so nothing is skipped, only one decode.
