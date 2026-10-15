@@ -7,6 +7,7 @@ import ffmpeg_utils
 from ffmpeg_utils import (
     AI_DISCLOSURE,
     DELIVERY,
+    INTERMEDIATE,
     METADATA_SCRUB,
     QUALITY,
     QUALITY_FAST,
@@ -248,6 +249,32 @@ def test_failed_gpu_cut_falls_back_to_the_cpu_decode(_cut, monkeypatch):
     assert "-hwaccel" in fake.commands[0]
     assert "-hwaccel" not in fake.commands[1]
     assert len(fake.commands) == 2
+
+
+# --- INTERMEDIATE: the cut is decoded again at once, so NVENC spends bits, not effort ---
+
+def test_intermediate_keeps_the_cpu_settings_of_quality_fast():
+    assert video_encode_args(INTERMEDIATE) == video_encode_args(QUALITY_FAST)
+
+
+def test_intermediate_on_nvenc_is_the_cheap_preset(monkeypatch):
+    monkeypatch.setenv("FFMPEG_ENCODER", "nvenc")
+    monkeypatch.setattr(ffmpeg_utils, "_probe_nvenc", lambda: True)
+    args = video_encode_args(INTERMEDIATE)
+    assert args[:2] == ["-c:v", "h264_nvenc"]
+    assert args[args.index("-preset") + 1] == "p1"
+    assert "-spatial-aq" not in args and "-tune" not in args
+    assert args[-2:] == ["-pix_fmt", "yuv420p"]
+    monkeypatch.setenv("CUT_NVENC_PRESET", "p3")
+    monkeypatch.setenv("CUT_NVENC_CQ", "17")
+    args = video_encode_args(INTERMEDIATE)
+    assert args[args.index("-preset") + 1] == "p3"
+    assert args[args.index("-cq") + 1] == "17"
+
+
+def test_cut_uses_the_intermediate_tier(_cut):
+    cmd = _cut([(0, 5_000_000, "")]).commands[0]
+    assert cmd[cmd.index("-preset") + 1] == "p1"
 
 
 # --- bin/ffmpeg: the thread cap every ffmpeg of the image goes through ---

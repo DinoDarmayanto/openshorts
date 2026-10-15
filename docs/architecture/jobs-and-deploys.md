@@ -58,6 +58,9 @@ Speed at equal quality:
 - **hooked_ + subtitled_ from one ffmpeg** (`hooks.add_hook_to_video(also=)`):
   the editor still needs both files (re-caption walks back to hooked_, hook
   replace to the canonical), so nothing is skipped, only one decode.
+- **Cheap cut** (`ffmpeg_utils.INTERMEDIATE`): the cut is decoded again by the
+  reframe at once, so on NVENC it uses p1 at a lower `-cq` (`CUT_NVENC_PRESET`,
+  `CUT_NVENC_CQ`) instead of p4 + hq + AQ. libx264 keeps its old settings.
 - **Thread cap** (`bin/ffmpeg`, first on the image's `PATH`): every ffmpeg gets
   `-threads FFMPEG_THREADS` per input and the same for its filter graphs.
   Uncapped, each one sized its pools to the whole machine, so a few jobs kept

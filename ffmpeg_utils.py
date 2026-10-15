@@ -18,11 +18,16 @@ import time
 QUALITY = "quality"            # was: -preset medium -crf 18
 QUALITY_FAST = "quality_fast"  # was: -preset fast -crf 18
 DELIVERY = "delivery"          # was: -preset fast -crf 22
+# A file the pipeline decodes again straight away (the cut that every render
+# reads). libx264 keeps QUALITY_FAST's settings; on NVENC it trades encoder
+# effort for bits instead, see _intermediate_nvenc_args.
+INTERMEDIATE = "intermediate"
 
 _X264_ARGS = {
     QUALITY: ["-c:v", "libx264", "-preset", "medium", "-crf", "18"],
     QUALITY_FAST: ["-c:v", "libx264", "-preset", "fast", "-crf", "18"],
     DELIVERY: ["-c:v", "libx264", "-preset", "fast", "-crf", "22"],
+    INTERMEDIATE: ["-c:v", "libx264", "-preset", "fast", "-crf", "18"],
 }
 
 # NVENC -cq is not 1:1 with x264 CRF: benchmarked on the prod GPU (RTX 4000
@@ -203,7 +208,25 @@ def video_encode_args(tier=QUALITY):
         print(f"🎞️ [Encoder] video encoder: {'h264_nvenc' if use_nvenc else 'libx264'} "
               f"(FFMPEG_ENCODER={mode})")
 
+    if use_nvenc and tier == INTERMEDIATE:
+        return _intermediate_nvenc_args()
     return list((_NVENC_ARGS if use_nvenc else _X264_ARGS)[tier])
+
+
+def _intermediate_nvenc_args():
+    """NVENC args for INTERMEDIATE: the cheapest preset at a lower -cq.
+
+    The cut is never delivered: the reframe decodes it and encodes the clip
+    again. Spending NVENC time on it (p4, hq tune, spatial AQ) bought quality
+    the next encode throws away, and on a busy card the cuts were the largest
+    share of the encoder's sessions. p1 is several times cheaper per frame; the
+    lower -cq spends bits instead so the clip that comes out of the reframe
+    stays the same. CUT_NVENC_PRESET / CUT_NVENC_CQ override both.
+    """
+    preset = os.environ.get("CUT_NVENC_PRESET", "p1").strip() or "p1"
+    cq = os.environ.get("CUT_NVENC_CQ", "19").strip() or "19"
+    return ["-c:v", "h264_nvenc", "-preset", preset, "-rc", "vbr", "-cq", cq,
+            "-b:v", "0", "-pix_fmt", "yuv420p"]
 
 
 def blurred_backdrop(out_w, out_h, sigma):
@@ -310,7 +333,7 @@ def cut_clip(input_video, clip_temp_path, start, end, clip_number):
     cached for the life of the process, so it stays true while a real 1080p
     session cannot allocate on a GPU that other jobs are filling.
     """
-    encode_args = video_encode_args(QUALITY_FAST)
+    encode_args = video_encode_args(INTERMEDIATE)
     command = [
         'ffmpeg', '-y',
         '-ss', str(start),
