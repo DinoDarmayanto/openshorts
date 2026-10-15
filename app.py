@@ -2615,9 +2615,27 @@ def enqueue_output(out, job_id):
     finally:
         out.close()
 
+def _job_nice():
+    """Niceness for a job process and everything it starts (ffmpeg, ASR...).
+
+    A job is batch work: when the host is short of CPU it should yield to the
+    API answering a user, editor renders included, which run in this process
+    at the normal priority. JOB_NICE=0 turns it off."""
+    try:
+        return max(0, min(19, int(os.environ.get("JOB_NICE", "10"))))
+    except ValueError:
+        return 10
+
+
+def _lower_priority():
+    n = _job_nice()
+    if n:
+        os.nice(n)
+
+
 async def run_job(job_id, job_data):
     """Executes the subprocess for a specific job."""
-    
+
     cmd = job_data['cmd']
     env = job_data['env']
     output_dir = job_data['output_dir']
@@ -2632,7 +2650,8 @@ async def run_job(job_id, job_data):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, # Merge stderr to stdout
             env=env,
-            cwd=os.getcwd()
+            cwd=os.getcwd(),
+            preexec_fn=_lower_priority,
         )
         
         # We need to capture logs in a thread because Popen isn't async

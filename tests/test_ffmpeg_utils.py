@@ -1,3 +1,4 @@
+import os
 import subprocess
 
 import pytest
@@ -247,3 +248,44 @@ def test_failed_gpu_cut_falls_back_to_the_cpu_decode(_cut, monkeypatch):
     assert "-hwaccel" in fake.commands[0]
     assert "-hwaccel" not in fake.commands[1]
     assert len(fake.commands) == 2
+
+
+# --- bin/ffmpeg: the thread cap every ffmpeg of the image goes through ---
+
+WRAPPER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "bin", "ffmpeg")
+
+
+def _wrapped(tmp_path, threads, *args):
+    echo = tmp_path / "echo-ffmpeg"
+    echo.write_text('#!/bin/sh\nfor a in "$@"; do printf \'%s\\n\' "$a"; done\n')
+    echo.chmod(0o755)
+    env = {"PATH": os.environ.get("PATH", ""), "FFMPEG_REAL_BIN": str(echo)}
+    if threads is not None:
+        env["FFMPEG_THREADS"] = threads
+    out = subprocess.run(["sh", WRAPPER, *args], env=env, capture_output=True,
+                         text=True, check=True).stdout
+    return out.splitlines()
+
+
+def test_wrapper_caps_decoder_and_filter_threads(tmp_path):
+    argv = _wrapped(tmp_path, "3", "-y", "-ss", "1", "-i", "a b.mp4", "-i", "logo.png",
+                    "-filter_complex", "[0:v][1:v]overlay", "-c:v", "h264_nvenc",
+                    "-threads", "8", "out.mp4")
+    assert argv == ["-filter_threads", "3", "-filter_complex_threads", "3",
+                    "-y", "-ss", "1", "-threads", "3", "-i", "a b.mp4",
+                    "-threads", "3", "-i", "logo.png",
+                    "-filter_complex", "[0:v][1:v]overlay", "-c:v", "h264_nvenc",
+                    "-threads", "8", "out.mp4"]
+
+
+def test_wrapper_keeps_what_the_caller_set(tmp_path):
+    argv = _wrapped(tmp_path, "2", "-threads", "5", "-i", "a.mp4",
+                    "-filter_threads", "1", "-i", "b.mp4", "out.mp4")
+    assert argv == ["-filter_complex_threads", "2", "-threads", "5", "-i", "a.mp4",
+                    "-filter_threads", "1", "-threads", "2", "-i", "b.mp4", "out.mp4"]
+
+
+@pytest.mark.parametrize("threads", [None, "", "0", "auto"])
+def test_wrapper_is_a_passthrough_when_unset(tmp_path, threads):
+    assert _wrapped(tmp_path, threads, "-i", "a.mp4", "x y.mp4") == ["-i", "a.mp4", "x y.mp4"]

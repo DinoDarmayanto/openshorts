@@ -87,6 +87,12 @@ RUN pip install --upgrade --pre --no-cache-dir "yt-dlp[default]" bgutil-ytdlp-po
 # Copy application code
 COPY . .
 
+# Every ffmpeg the app starts goes through bin/ffmpeg, which caps its decoder
+# and filter threads (docs/architecture/jobs-and-deploys.md). Uncapped, each
+# one sized its pools to the whole machine; at 2 the same encode used less
+# than half the CPU and finished sooner on a busy host, byte-identical.
+ENV PATH="/app/bin:$PATH" FFMPEG_THREADS=2
+
 # Register the bundled fonts (Anton for Impact) and the UI-name -> real-font
 # aliases with fontconfig so libass resolves what the subtitle modal offers.
 RUN mkdir -p /usr/local/share/fonts/openshorts \

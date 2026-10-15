@@ -178,3 +178,15 @@ class TestQueueEstimate:
         assert app_module.queue_snapshot("b")["position"] == 4
         app_module.jobs["a"]["status"] = "processing"
         assert app_module.queue_snapshot("a") is None
+
+
+@pytest.mark.parametrize("value,expected", [(None, 10), ("0", 0), ("5", 5), ("40", 19),
+                                            ("-3", 0), ("x", 10)])
+def test_job_processes_run_niced(monkeypatch, value, expected):
+    """Jobs are batch work: under CPU pressure the API (and editor renders,
+    which run in it) go first. JOB_NICE=0 turns it off."""
+    if value is None:
+        monkeypatch.delenv("JOB_NICE", raising=False)
+    else:
+        monkeypatch.setenv("JOB_NICE", value)
+    assert app_module._job_nice() == expected

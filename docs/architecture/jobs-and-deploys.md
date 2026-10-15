@@ -56,6 +56,15 @@ Speed at equal quality:
 - **hooked_ + subtitled_ from one ffmpeg** (`hooks.add_hook_to_video(also=)`):
   the editor still needs both files (re-caption walks back to hooked_, hook
   replace to the canonical), so nothing is skipped, only one decode.
+- **Thread cap** (`bin/ffmpeg`, first on the image's `PATH`): every ffmpeg gets
+  `-threads FFMPEG_THREADS` per input and the same for its filter graphs.
+  Uncapped, each one sized its pools to the whole machine, so a few jobs kept
+  more runnable threads than cores. Decoding and filtering are deterministic:
+  the clips are byte-identical. Unset or 0 = uncapped.
+- **Jobs run niced** (`JOB_NICE`, default 10, `app._lower_priority`): under CPU
+  pressure the API and the editor endpoints, which run in the API process, go
+  first. Containers compete by their CPU weight, not by nice, so this only
+  orders work inside the instance.
 - **`CLIP_WORKERS=6`** by default.
 
 Tried and dropped: NVDEC for the analysis decodes and `scale_cuda` (slower, and
