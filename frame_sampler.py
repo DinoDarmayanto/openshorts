@@ -8,7 +8,12 @@ a single forward pass that keeps the frames asked for (prod bench,
 25-sep-2026). The frames are byte-identical either way (checked on 217
 samples of NVENC-cut clips), so every downstream decision stays the same.
 """
+import subprocess
+
 import cv2
+import numpy as np
+
+import gpu_decode
 
 # Past this many frames ahead, one seek is cheaper than decoding forward to
 # the target (an NVENC cut's GOP is ~250 frames).
@@ -46,3 +51,70 @@ def read_at(cap, indices, max_forward=MAX_FORWARD):
                 frame = None
         last = (idx, frame)
         yield frame
+
+
+def read_at_path(video_path, cap, indices, max_forward=MAX_FORWARD):
+    """``read_at`` for a file, decoding the samples on the card when it can.
+
+    One ffmpeg pass decodes the clip with NVDEC and downloads only the asked
+    frames, converted to BGR the way ``cap.read()`` converts them (see
+    gpu_decode): the same frames for a fraction of the CPU. Falls back to
+    ``read_at(cap, ...)`` for indices that are not non-decreasing, when the
+    card is not usable, and for whatever is left if that ffmpeg fails.
+    ``cap`` must be freshly opened, as for ``read_at``.
+    """
+    indices = [int(i) for i in indices]
+    if (not indices or indices[0] < 0
+            or any(b < a for a, b in zip(indices, indices[1:]))
+            or not gpu_decode.usable(video_path)):
+        yield from read_at(cap, indices, max_forward)
+        return
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if width <= 0 or height <= 0:
+        yield from read_at(cap, indices, max_forward)
+        return
+    unique = sorted(set(indices))
+    frame_bytes = width * height * 3
+    expr = "+".join(f"eq(n,{i})" for i in unique) or "0"
+    proc = subprocess.Popen(
+        ["ffmpeg", "-loglevel", "error", *gpu_decode.HW_ARGS, "-i", video_path,
+         "-vf", f"select='{expr}',{gpu_decode.DOWNLOAD}", "-fps_mode", "passthrough",
+         "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=frame_bytes)
+    done = 0           # how many of ``indices`` were answered from the card
+    last = (None, None)
+    ended = False
+    failed = False
+    try:
+        for idx in indices:
+            if idx == last[0]:
+                yield last[1]
+                done += 1
+                continue
+            frame = None
+            if not ended:
+                buf = bytearray(frame_bytes)
+                got = proc.stdout.readinto(buf)
+                if got == frame_bytes:
+                    frame = np.frombuffer(buf, dtype=np.uint8).reshape(height, width, 3)
+                else:
+                    ended = True
+                    proc.stdout.close()
+                    # Past the clip's last frame read_at gives None too; an
+                    # ffmpeg that failed leaves the rest to the CPU.
+                    failed = proc.wait() != 0
+                    if failed:
+                        break
+            last = (idx, frame)
+            done += 1
+            yield frame
+    finally:
+        if not proc.stdout.closed:
+            proc.stdout.close()
+        proc.kill()
+        proc.wait()
+    gpu_decode.note(True, failed=failed)
+    if failed:
+        print("   ⚠️ GPU frame sampling failed, reading the rest on the CPU")
+        yield from read_at(cap, indices[done:], max_forward)

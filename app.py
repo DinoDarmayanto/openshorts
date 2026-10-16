@@ -2589,6 +2589,10 @@ def enqueue_output(out, job_id):
                     except ValueError:
                         pass
                     continue
+                if decoded_line.startswith("JOB_CPU "):
+                    # Internal marker: the job's CPU time (main.py, at exit).
+                    print(f"📊 [job-cpu] {job_id} {decoded_line[8:]}")
+                    continue
                 if decoded_line.startswith("PROXY_BYTES="):
                     try:
                         if job_id in jobs:

@@ -305,7 +305,7 @@ def _shot_frames(video_path, scenes, indices):
     if not cap.isOpened():
         return []
     try:
-        frames = list(frame_sampler.read_at(cap, mids))
+        frames = list(frame_sampler.read_at_path(video_path, cap, mids))
     finally:
         cap.release()
     return [_encode_frame(f, SHOT_SAMPLE_WIDTH) if f is not None else None

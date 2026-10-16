@@ -263,7 +263,7 @@ def detect_split_scenes(video_path, scenes, strategies, samples=None):
         # One forward pass for every scene's samples (frame_sampler): the same
         # frames, detected in the same order as a seek per sample.
         flat = [f_idx for _i, _n, idxs in plan for f_idx in idxs]
-        frames = frame_sampler.read_at(cap, flat)
+        frames = frame_sampler.read_at_path(video_path, cap, flat)
         for i, n, idxs in plan:
             sampled = []
             for _f_idx in idxs:

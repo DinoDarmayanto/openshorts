@@ -22,6 +22,7 @@ import subprocess
 import tempfile
 
 import active_speaker
+import gpu_decode
 import camera_inset
 import punch_in
 import screencast_layout
@@ -250,87 +251,266 @@ def apply_crop_overrides(xs, strategies, scene_boundaries, overrides,
     return xs, strategies
 
 
-def _analyze_trajectory(input_video, scenes_boundaries, scene_strategies,
-                        fps, orig_w, orig_h, cameraman, tracker):
-    """Replays v1's per-frame decision loop on a downscaled ffmpeg-decoded
-    stream. Returns xs: crop x per frame (None on GENERAL frames)."""
-    import numpy as np
-    import main as m
+# Layouts whose crop is fixed for the whole scene: no camera trajectory.
+_STATIC_LAYOUTS = ('GENERAL', 'SPLIT', 'SCREENCAST', 'WIDE', 'INSET', 'ALTERNATE')
 
+# Decode only the frames the trajectory runs a detector on (see
+# _detection_frames). SPARSE_TRAJECTORY=0 pipes every frame again.
+SPARSE_TRAJECTORY = os.environ.get("SPARSE_TRAJECTORY", "1").strip() != "0"
+
+
+class _SparseMismatch(Exception):
+    """The sparse pass did not see the frames it expected; redo it in full."""
+
+
+def _analysis_size(orig_w, orig_h):
     small_w = min(ANALYSIS_MAX_WIDTH, orig_w)
     if small_w % 2:
         small_w -= 1
     small_h = max(int(orig_h * small_w / orig_w), 2)
     if small_h % 2:
         small_h += 1
-    scale = orig_w / small_w
-    frame_bytes = small_w * small_h * 3
+    return small_w, small_h
 
-    proc = subprocess.Popen(
-        ["ffmpeg", "-loglevel", "error", "-i", input_video,
-         "-vf", f"scale={small_w}:{small_h}",
-         "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=frame_bytes * 4)
+
+def _walk_scenes(scenes_boundaries, scene_strategies, n_frames):
+    """(frame_number, scene_index, strategy) for every frame, advancing through
+    the scenes exactly like the trajectory loop does."""
+    current = 0
+    for frame_number in range(n_frames):
+        if current < len(scenes_boundaries):
+            _start_f, end_f = scenes_boundaries[current]
+            if frame_number >= end_f and current < len(scenes_boundaries) - 1:
+                current += 1
+        strategy = (scene_strategies[current]
+                    if current < len(scene_strategies) else 'TRACK')
+        yield frame_number, current, strategy
+
+
+def _detection_frames(scenes_boundaries, scene_strategies, n_frames, stride,
+                      cut_reset):
+    """Frame numbers the trajectory loop hands a detector, in order.
+
+    Every other frame only advances the camera's smoothing, which never looks
+    at pixels. With DETECT_STRIDE=4 that is three frames in four, and none at
+    all in the scenes with a fixed crop."""
+    frames = []
+    for frame_number, current, strategy in _walk_scenes(
+            scenes_boundaries, scene_strategies, n_frames):
+        if strategy in _STATIC_LAYOUTS:
+            continue
+        is_scene_start = (current < len(scenes_boundaries)
+                          and frame_number == scenes_boundaries[current][0])
+        if frame_number % stride == 0 or (is_scene_start and cut_reset):
+            frames.append(frame_number)
+    return frames
+
+
+def select_expr(frames, stride):
+    """ffmpeg select= expression true exactly on ``frames`` (sorted, unique).
+
+    Runs of stride-aligned frames ``stride`` apart collapse into one
+    between()*not(mod()) term so a long clip stays a short expression."""
+    terms = []
+    i = 0
+    while i < len(frames):
+        j = i
+        if frames[i] % stride == 0:
+            while j + 1 < len(frames) and frames[j + 1] == frames[j] + stride:
+                j += 1
+        if j - i >= 2:
+            terms.append(f"between(n,{frames[i]},{frames[j]})*not(mod(n,{stride}))")
+        else:
+            j = i
+            terms.append(f"eq(n,{frames[i]})")
+        i = j + 1
+    return "+".join(terms) if terms else "0"
+
+
+def _trajectory_loop(next_frame, sparse, n_frames, scenes_boundaries,
+                     scene_strategies, orig_w, scale, cameraman, tracker):
+    """v1's per-frame decision loop. ``next_frame()`` returns the next decoded
+    frame (None at the end). Dense: one call per frame, the loop ends with the
+    stream. Sparse: ``n_frames`` iterations and a call only where a detector
+    runs (``next_frame(frame_number)``)."""
+    import main as m
 
     xs = []
     frame_number = 0
     current_scene_index = 0
-    try:
-        while True:
-            buf = proc.stdout.read(frame_bytes)
-            if len(buf) < frame_bytes:
+    while not sparse or frame_number < n_frames:
+        frame = None
+        if not sparse:
+            frame = next_frame()
+            if frame is None:
                 break
-            frame = np.frombuffer(buf, dtype=np.uint8).reshape((small_h, small_w, 3))
 
-            if current_scene_index < len(scenes_boundaries):
-                start_f, end_f = scenes_boundaries[current_scene_index]
-                if frame_number >= end_f and current_scene_index < len(scenes_boundaries) - 1:
-                    current_scene_index += 1
+        if current_scene_index < len(scenes_boundaries):
+            start_f, end_f = scenes_boundaries[current_scene_index]
+            if frame_number >= end_f and current_scene_index < len(scenes_boundaries) - 1:
+                current_scene_index += 1
 
-            strategy = (scene_strategies[current_scene_index]
-                        if current_scene_index < len(scene_strategies) else 'TRACK')
+        strategy = (scene_strategies[current_scene_index]
+                    if current_scene_index < len(scene_strategies) else 'TRACK')
 
-            # SPLIT, SCREENCAST and WIDE crops are static (fixed boxes for the
-            # whole scene), so like GENERAL they need no camera trajectory.
-            # ALTERNATE gets one written in after this pass.
-            if strategy in ('GENERAL', 'SPLIT', 'SCREENCAST', 'WIDE',
-                            'INSET', 'ALTERNATE'):
-                cameraman.current_center_x = orig_w / 2
-                cameraman.target_center_x = orig_w / 2
-                xs.append(None)
-            else:
-                is_scene_start = (
-                    current_scene_index < len(scenes_boundaries)
-                    and frame_number == scenes_boundaries[current_scene_index][0])
-                cut = is_scene_start and m.SCENE_CUT_RESET
-                if cut:
-                    # New shot: forget the old subject and cut to the new one
-                    # (see SmoothedCameraman.begin_scene).
-                    tracker.reset()
-                    cameraman.begin_scene()
+        # SPLIT, SCREENCAST and WIDE crops are static (fixed boxes for the
+        # whole scene), so like GENERAL they need no camera trajectory.
+        # ALTERNATE gets one written in after this pass.
+        if strategy in _STATIC_LAYOUTS:
+            cameraman.current_center_x = orig_w / 2
+            cameraman.target_center_x = orig_w / 2
+            xs.append(None)
+        else:
+            is_scene_start = (
+                current_scene_index < len(scenes_boundaries)
+                and frame_number == scenes_boundaries[current_scene_index][0])
+            cut = is_scene_start and m.SCENE_CUT_RESET
+            if cut:
+                # New shot: forget the old subject and cut to the new one
+                # (see SmoothedCameraman.begin_scene).
+                tracker.reset()
+                cameraman.begin_scene()
 
-                if frame_number % m.DETECT_STRIDE == 0 or cut:
-                    candidates = m.detect_face_candidates(frame)
-                    for cand in candidates:
-                        cand['box'] = [int(v * scale) for v in cand['box']]
-                        cand['score'] = cand['box'][2] * cand['box'][3]
-                    target_box = tracker.get_target(candidates, frame_number, orig_w)
-                    if target_box:
-                        cameraman.update_target(target_box)
-                    elif frame_number % m.YOLO_FALLBACK_STRIDE == 0 or cut:
-                        person_box = m.detect_person_yolo(frame)
-                        if person_box:
-                            cameraman.update_target([int(v * scale) for v in person_box])
+            if frame_number % m.DETECT_STRIDE == 0 or cut:
+                if sparse:
+                    frame = next_frame(frame_number)
+                candidates = m.detect_face_candidates(frame)
+                for cand in candidates:
+                    cand['box'] = [int(v * scale) for v in cand['box']]
+                    cand['score'] = cand['box'][2] * cand['box'][3]
+                target_box = tracker.get_target(candidates, frame_number, orig_w)
+                if target_box:
+                    cameraman.update_target(target_box)
+                elif frame_number % m.YOLO_FALLBACK_STRIDE == 0 or cut:
+                    person_box = m.detect_person_yolo(frame)
+                    if person_box:
+                        cameraman.update_target([int(v * scale) for v in person_box])
 
-                x1, _y1, _x2, _y2 = cameraman.get_crop_box(force_snap=is_scene_start)
-                xs.append(x1)
+            x1, _y1, _x2, _y2 = cameraman.get_crop_box(force_snap=is_scene_start)
+            xs.append(x1)
 
-            frame_number += 1
+        frame_number += 1
+    return xs
+
+
+def _read_frame(stream, frame_bytes, shape):
+    import numpy as np
+    buf = stream.read(frame_bytes)
+    if len(buf) < frame_bytes:
+        return None
+    return np.frombuffer(buf, dtype=np.uint8).reshape(shape)
+
+
+def _sparse_trajectory(input_video, n_frames, on_gpu, small_w, small_h,
+                       scenes_boundaries, scene_strategies, orig_w, scale,
+                       cameraman, tracker):
+    """The trajectory decoding only the detector's frames (plus the last one,
+    and anything past it, to prove the clip has exactly ``n_frames``)."""
+    import main as m
+
+    wanted = _detection_frames(scenes_boundaries, scene_strategies, n_frames,
+                               m.DETECT_STRIDE, m.SCENE_CUT_RESET)
+    piped = sorted(set(wanted) | {n_frames - 1})
+    expr = f"{select_expr(piped, m.DETECT_STRIDE)}+gte(n,{n_frames})"
+    chain = f"scale={small_w}:{small_h}"
+    vf = (f"select='{expr}',{gpu_decode.DOWNLOAD},{chain}" if on_gpu
+          else f"select='{expr}',{chain}")
+    frame_bytes = small_w * small_h * 3
+    shape = (small_h, small_w, 3)
+    proc = subprocess.Popen(
+        ["ffmpeg", "-loglevel", "error", *gpu_decode.input_args(on_gpu),
+         "-i", input_video, "-vf", vf, "-fps_mode", "passthrough",
+         "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=frame_bytes * 4)
+    queue = iter(piped)
+
+    def next_frame(frame_number):
+        expected = next(queue, None)
+        if expected != frame_number:
+            raise _SparseMismatch(f"asked frame {frame_number}, stream has {expected}")
+        frame = _read_frame(proc.stdout, frame_bytes, shape)
+        if frame is None:
+            raise _SparseMismatch(f"stream ended before frame {frame_number}")
+        return frame
+
+    try:
+        xs = _trajectory_loop(next_frame, True, n_frames, scenes_boundaries,
+                              scene_strategies, orig_w, scale, cameraman, tracker)
+        for frame_number in queue:  # the last frame, when no detector wanted it
+            if _read_frame(proc.stdout, frame_bytes, shape) is None:
+                raise _SparseMismatch(f"stream ended before frame {frame_number}")
+        if proc.stdout.read(1):
+            raise _SparseMismatch(f"clip has more than {n_frames} frames")
     finally:
         proc.stdout.close()
+        proc.kill()
         proc.wait()
-
     return xs
+
+
+def _analyze_trajectory(input_video, scenes_boundaries, scene_strategies,
+                        fps, orig_w, orig_h, cameraman, tracker):
+    """Replays v1's per-frame decision loop on a downscaled ffmpeg-decoded
+    stream. Returns xs: crop x per frame (None on GENERAL frames).
+
+    When the scene pass counted the clip's frames, only the frames a detector
+    looks at are decoded and scaled (on the card when it can): same frames,
+    same detector calls, same xs. Anything unexpected restores the camera and
+    tracker and runs the full pass, itself on the card when it can."""
+    import copy
+
+    small_w, small_h = _analysis_size(orig_w, orig_h)
+    scale = orig_w / small_w
+    n_frames = gpu_decode.decoded_frames(input_video) if SPARSE_TRAJECTORY else None
+    on_card = gpu_decode.usable(input_video)
+    saved = copy.deepcopy(cameraman.__dict__), copy.deepcopy(tracker.__dict__)
+
+    def restore():
+        cameraman.__dict__.clear()
+        cameraman.__dict__.update(copy.deepcopy(saved[0]))
+        tracker.__dict__.clear()
+        tracker.__dict__.update(copy.deepcopy(saved[1]))
+
+    if n_frames:
+        for on_gpu in ([True, False] if on_card else [False]):
+            try:
+                xs = _sparse_trajectory(input_video, n_frames, on_gpu, small_w, small_h,
+                                        scenes_boundaries, scene_strategies, orig_w,
+                                        scale, cameraman, tracker)
+                gpu_decode.note(on_gpu)
+                return xs
+            except _SparseMismatch as e:
+                print(f"   ⚠️ Sparse trajectory pass ({'GPU' if on_gpu else 'CPU'}): {e}")
+                if on_gpu:
+                    gpu_decode.note(True, failed=True)
+                restore()
+
+    # Every frame, as before; decoded on the card when it can (same frames).
+    # A card decode that does not end cleanly is thrown away and redone.
+    for on_gpu in ([True, False] if on_card and not n_frames else [False]):
+        frame_bytes = small_w * small_h * 3
+        proc = subprocess.Popen(
+            ["ffmpeg", "-loglevel", "error", *gpu_decode.input_args(on_gpu),
+             "-i", input_video,
+             "-vf", gpu_decode.vf(f"scale={small_w}:{small_h}", on_gpu),
+             "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=frame_bytes * 4)
+        try:
+            xs = _trajectory_loop(
+                lambda: _read_frame(proc.stdout, frame_bytes, (small_h, small_w, 3)),
+                False, None, scenes_boundaries, scene_strategies, orig_w, scale,
+                cameraman, tracker)
+        finally:
+            proc.stdout.close()
+            rc = proc.wait()
+        if not on_gpu:
+            return xs
+        if rc == 0 and xs:
+            gpu_decode.note(True)
+            return xs
+        gpu_decode.note(True, failed=True)
+        print("   ⚠️ GPU trajectory decode failed, decoding on the CPU")
+        restore()
 
 
 # --- render -----------------------------------------------------------------
@@ -338,6 +518,30 @@ def _analyze_trajectory(input_video, scenes_boundaries, scene_strategies,
 def _run(cmd):
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL,
                    stderr=subprocess.PIPE, timeout=1800)
+
+
+def _run_segment(input_video, ss, dur, extra_inputs, graph, out_label, seg_path):
+    """Encode one scene. The clip is decoded on the card when it can
+    (gpu_decode: the same frames, so the same segment) and on the CPU if that
+    ffmpeg fails."""
+    def build(on_gpu):
+        on_gpu = on_gpu and gpu_decode.graph_ok(graph)
+        return [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-ss", f"{ss:.4f}", "-t", f"{dur:.4f}",
+            *gpu_decode.input_args(on_gpu), "-i", input_video, *extra_inputs,
+            "-filter_complex", gpu_decode.graph(graph, on_gpu), "-map", out_label,
+            *video_encode_args(QUALITY_FAST), "-an", seg_path,
+        ]
+
+    def runner(cmd):
+        return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                              timeout=1800)
+
+    result = gpu_decode.run(build, runner, path=input_video)
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, result.args,
+                                            result.stdout, result.stderr)
 
 
 def screen_ranges(input_video, scenes, fps, strategies):
@@ -629,17 +833,12 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
                     f"scale={out_w}:{out_h},setsar=1[v]"
                 )
 
-            inputs, out_label = ["-i", input_video], "[v]"
+            extra, out_label = [], "[v]"
             if logo:
-                inputs += ["-i", logo]
+                extra = ["-i", logo]
                 graph += ";" + m.watermark_filter(out_w, out_h, video="[v]", out="[vw]")
                 out_label = "[vw]"
-            _run([
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-ss", f"{ss:.4f}", "-t", f"{dur:.4f}", *inputs,
-                "-filter_complex", graph, "-map", out_label,
-                *video_encode_args(QUALITY_FAST), "-an", seg_path,
-            ])
+            _run_segment(input_video, ss, dur, extra, graph, out_label, seg_path)
             segments.append(seg_path)
 
         list_path = os.path.join(workdir, "concat.txt")

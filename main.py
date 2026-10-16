@@ -24,6 +24,7 @@ from google import genai
 from google.genai import types as genai_types
 
 import frame_sampler
+import gpu_decode
 import gemini_worker
 import hook_grounding
 import layout_picker
@@ -585,7 +586,7 @@ def analyze_scenes_strategy(video_path, scenes):
         plan.extend((si, f_idx) for f_idx in frames_to_check)
 
     counts_per_scene = [[] for _ in scenes]
-    frames = frame_sampler.read_at(cap, [f_idx for _si, f_idx in plan])
+    frames = frame_sampler.read_at_path(video_path, cap, [f_idx for _si, f_idx in plan])
     for (si, _f_idx), frame in tqdm(zip(plan, frames), total=len(plan),
                                     desc="   Analyzing Scenes"):
         if frame is None:
@@ -1504,8 +1505,12 @@ def apply_watermark(video_path, output_path=None):
            "-filter_complex", filt,
            *video_encode_args(QUALITY), "-c:a", "copy", *METADATA_SCRUB,
            "-movflags", "+faststart", tmp_path]
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                            timeout=1800)
+    result = gpu_decode.run(
+        lambda on_gpu: gpu_decode.on_card(cmd, video_path) if on_gpu else cmd,
+        lambda c: subprocess.run(c, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                 timeout=1800),
+        ok=lambda r: r.returncode == 0 and os.path.exists(tmp_path),
+        path=video_path)
     if result.returncode == 0 and os.path.exists(tmp_path):
         os.replace(tmp_path, output_path or video_path)
         return True
@@ -2272,7 +2277,24 @@ if __name__ == '__main__':
     output_format = args.format
 
     script_start_time = time.time()
-    
+
+    def _report_job_cpu():
+        """CPU time of the whole job (this process + every ffmpeg it waited
+        for) for app.py's log, to compare pipeline versions per job."""
+        import resource
+        own = resource.getrusage(resource.RUSAGE_SELF)
+        kids = resource.getrusage(resource.RUSAGE_CHILDREN)
+        py_s = own.ru_utime + own.ru_stime
+        children_s = kids.ru_utime + kids.ru_stime
+        print("JOB_CPU " + json.dumps({
+            "wall_s": round(time.time() - script_start_time, 1),
+            "cpu_s": round(py_s + children_s, 1), "py_s": round(py_s, 1),
+            "children_s": round(children_s, 1), "gpu_decode": dict(gpu_decode.STATS),
+        }), flush=True)
+
+    import atexit
+    atexit.register(_report_job_cpu)
+
     def _ensure_dir(path: str) -> str:
         """Create directory if missing and return the same path."""
         if path:

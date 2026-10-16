@@ -73,9 +73,29 @@ Speed at equal quality:
   first. Containers compete by their CPU weight, not by nice, so this only
   orders work inside the instance.
 - **`CLIP_WORKERS=6`** by default.
+- **Decode on the card, keep the CPU's pixels** (`gpu_decode`): the scene
+  pass, the sampled frames of the classifiers (`frame_sampler.read_at_path`),
+  the trajectory, every reframe segment and the hook/caption/watermark burns
+  decode with NVDEC. Frames come down as nv12 and are repacked to yuv420p
+  before any other filter (`gpu_decode.DOWNLOAD`): nv12 converted straight to
+  BGR differs from the CPU decode, the repacked frame does not. Only 8-bit
+  4:2:0 H.264/HEVC without rotation, and only with `GPU_DECODE_MIN_FREE_MB`
+  free on the card; any ffmpeg that fails on the card runs again on the CPU.
+  Kill switches: `GPU_DECODE=0` (all), `GPU_DECODE_RENDER=0` (encodes only).
+- **Sparse trajectory** (`reframe_v2._sparse_trajectory`, `SPARSE_TRAJECTORY`):
+  the detectors look at one frame in `DETECT_STRIDE` plus scene starts, and only
+  in TRACK scenes, so only those are scaled and piped (ffmpeg `select`). It
+  needs the clip's frame count from the scene pass, kept only when that
+  rawvideo pipe repeated or dropped no frame (`dup=`/`drop=` in its report):
+  the trajectory counts the frames of a constant-frame-rate pipe, `select`
+  counts decoded frames, and the two agree only then. Any mismatch restores the
+  camera and runs the full pass.
+- **Per-job CPU** (`JOB_CPU` marker at main.py exit, logged by the API as
+  `[job-cpu]`): CPU-seconds of the job process plus every ffmpeg it waited for,
+  wall time and the GPU decode counters, to compare pipeline versions per job.
 
-Tried and dropped: NVDEC for the analysis decodes and `scale_cuda` (slower, and
-scale_cuda does not match swscale); yt-dlp chunking/concurrent fragments (no
+Tried and dropped: `scale_cuda`/`scale_npp` for the analysis frames (their
+pixels differ from swscale's, so the detectors would see other frames); yt-dlp chunking/concurrent fragments (no
 gain). Method for such changes: record Gemini decisions once and replay them,
 run old and new code side by side, compare clips by decoded-frame MD5 / SSIM.
 

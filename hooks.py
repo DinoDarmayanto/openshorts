@@ -7,6 +7,7 @@ import uuid
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 from ffmpeg_utils import video_encode_args, QUALITY, METADATA_SCRUB, finished_before_crash
+import gpu_decode
 
 
 def _truncate_bytes(text, max_bytes):
@@ -592,8 +593,12 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
             outputs.append(also[1])
             if mark:
                 outputs.append(mark[2])
-        result = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                timeout=1800)
+        result = gpu_decode.run(
+            lambda on_gpu: gpu_decode.on_card(ffmpeg_cmd, video_path) if on_gpu else ffmpeg_cmd,
+            lambda cmd: subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       timeout=1800),
+            ok=lambda r: r.returncode == 0 or finished_before_crash(r, outputs),
+            path=video_path)
         if result.returncode != 0 and not finished_before_crash(result, outputs):
             raise subprocess.CalledProcessError(result.returncode, ffmpeg_cmd,
                                                 result.stdout, result.stderr)

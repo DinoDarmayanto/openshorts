@@ -28,6 +28,8 @@ import numpy as np
 from scenedetect import open_video, SceneManager, FrameTimecode
 from scenedetect.detectors import ContentDetector
 
+import gpu_decode
+
 # TransNetV2 input size (width x height), fixed by the trained model.
 _TN2_W, _TN2_H = 48, 27
 
@@ -77,18 +79,30 @@ def _get_tn2_model():
 
 
 def _extract_frames_small(video_path):
-    """Decode the whole clip as 48x27 RGB frames via ffmpeg (~4KB/frame)."""
-    cmd = [
-        "ffmpeg", "-nostdin", "-i", video_path,
-        "-vf", f"scale={_TN2_W}:{_TN2_H}",
-        "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
-    ]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE,
-                          stderr=subprocess.DEVNULL, check=True, timeout=900)
+    """Decode the whole clip as 48x27 RGB frames via ffmpeg (~4KB/frame).
+
+    Decoded on the card when it can (gpu_decode: same frames). The number of
+    frames decoded is remembered for the trajectory pass
+    (``gpu_decode.decoded_frames``)."""
+    def build(on_gpu):
+        return ["ffmpeg", "-nostdin", *gpu_decode.input_args(on_gpu), "-i", video_path,
+                "-vf", gpu_decode.vf(f"scale={_TN2_W}:{_TN2_H}", on_gpu),
+                "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
+
+    def runner(cmd):
+        return subprocess.run(cmd, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, timeout=900)
+
+    proc = gpu_decode.run(build, runner, ok=lambda r: r.returncode == 0 and r.stdout,
+                          path=video_path, render=False)
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, proc.args)
     frame_bytes = _TN2_H * _TN2_W * 3
     n = len(proc.stdout) // frame_bytes
     if n == 0:
         raise RuntimeError("ffmpeg produced no frames")
+    if gpu_decode.one_frame_per_decoded_frame(proc.stderr):
+        gpu_decode.remember_count(video_path, n)
     return np.frombuffer(proc.stdout[:n * frame_bytes],
                          dtype=np.uint8).reshape(n, _TN2_H, _TN2_W, 3)
 

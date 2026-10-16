@@ -5,6 +5,7 @@ import sys
 
 from ffmpeg_utils import (video_encode_args, escape_filter_value, QUALITY,
                           METADATA_SCRUB, finished_before_crash)
+import gpu_decode
 
 
 _STDIO_CONFIGURED = False
@@ -700,7 +701,11 @@ def burn_subtitles(video_path, srt_path, output_path, alignment=2, fontsize=16,
         cmd = ['ffmpeg', '-y', '-i', video_path, '-vf', vf, *tail, output_path]
 
     _log(f"🎬 Burning subtitles: {' '.join(cmd)}")
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    result = gpu_decode.run(
+        lambda on_gpu: gpu_decode.on_card(cmd, video_path) if on_gpu else cmd,
+        lambda c: subprocess.run(c, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE),
+        ok=lambda r: r.returncode == 0 or finished_before_crash(r, outputs),
+        path=video_path)
 
     if result.returncode != 0 and not finished_before_crash(result, outputs):
         stderr_text = result.stderr.decode(errors='replace')
