@@ -77,7 +77,7 @@ def read_at_path(video_path, cap, indices, max_forward=MAX_FORWARD):
         return
     unique = sorted(set(indices))
     frame_bytes = width * height * 3
-    expr = "+".join(f"eq(n,{i})" for i in unique) or "0"
+    expr = gpu_decode.any_of(f"eq(n,{i})" for i in unique)
     errors = tempfile.TemporaryFile()
     proc = subprocess.Popen(
         ["ffmpeg", "-loglevel", "error", *gpu_decode.HW_ARGS, "-i", video_path,

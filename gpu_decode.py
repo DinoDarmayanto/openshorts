@@ -210,6 +210,20 @@ def remember_count(path, n):
             _decoded[key] = n
 
 
+def any_of(terms):
+    """ffmpeg expression true when any of ``terms`` is, as a balanced tree of
+    sums: ffmpeg refuses a flat a+b+c+... of more than about a hundred terms
+    ("Cannot allocate memory" from its expression parser's depth limit), and a
+    clip easily asks for more samples than that."""
+    terms = list(terms)
+    if not terms:
+        return "0"
+    while len(terms) > 1:
+        terms = [f"({terms[k]}+{terms[k + 1]})" if k + 1 < len(terms) else terms[k]
+                 for k in range(0, len(terms), 2)]
+    return terms[0]
+
+
 def one_frame_per_decoded_frame(stderr):
     """True when an ffmpeg rawvideo pipe carried the decoded frames one for one.
 

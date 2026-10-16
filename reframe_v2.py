@@ -324,7 +324,7 @@ def select_expr(frames, stride):
             j = i
             terms.append(f"eq(n,{frames[i]})")
         i = j + 1
-    return "+".join(terms) if terms else "0"
+    return gpu_decode.any_of(terms)
 
 
 def _trajectory_loop(next_frame, sparse, n_frames, scenes_boundaries,
@@ -411,7 +411,7 @@ def _sparse_trajectory(input_video, n_frames, on_gpu, small_w, small_h,
     wanted = _detection_frames(scenes_boundaries, scene_strategies, n_frames,
                                m.DETECT_STRIDE, m.SCENE_CUT_RESET)
     piped = sorted(set(wanted) | {n_frames - 1})
-    expr = f"{select_expr(piped, m.DETECT_STRIDE)}+gte(n,{n_frames})"
+    expr = gpu_decode.any_of([select_expr(piped, m.DETECT_STRIDE), f"gte(n,{n_frames})"])
     chain = f"scale={small_w}:{small_h}"
     vf = (f"select='{expr}',{gpu_decode.DOWNLOAD},{chain}" if on_gpu
           else f"select='{expr}',{chain}")

@@ -119,6 +119,7 @@ def test_select_expr_is_true_exactly_on_the_frames(seed):
 def test_select_expr_collapses_stride_runs():
     expr = reframe_v2.select_expr(list(range(0, 4000, 4)), 4)
     assert expr == "between(n,0,3996)*not(mod(n,4))"
+    assert reframe_v2.select_expr([1, 5, 6], 4) == "((eq(n,1)+eq(n,5))+eq(n,6))"
     assert reframe_v2.select_expr([], 4) == "0"
 
 
@@ -323,3 +324,18 @@ def test_dense_card_decode_that_fails_is_redone_on_the_cpu(monkeypatch, fake_mai
     out = reframe_v2._analyze_trajectory("clip.mp4", SCENES, STRATS, 30.0, 4, 4, cam, tr)
     assert runs == [True, False]
     assert out == xs
+
+
+def test_any_of_stays_shallow_for_many_terms():
+    """A flat sum of more than ~100 terms is refused by ffmpeg."""
+    terms = [f"eq(n,{i})" for i in range(0, 1500, 3)]
+    expr = gpu_decode.any_of(terms)
+    depth = deepest = 0
+    for ch in expr:
+        depth += ch == "("
+        depth -= ch == ")"
+        deepest = max(deepest, depth)
+    assert deepest <= 10
+    assert _selected(expr, 1520) == list(range(0, 1500, 3))
+    assert gpu_decode.any_of([]) == "0"
+    assert gpu_decode.any_of(["eq(n,4)"]) == "eq(n,4)"
