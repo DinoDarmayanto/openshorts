@@ -52,9 +52,11 @@ Speed at equal quality:
 - **Blur at quarter size** (`ffmpeg_utils.blurred_backdrop`).
 - **Watermark as a served copy** (`main.mark_delivery`, see `watermark.md`):
   after captions. It must not ride the reframe encode, which would make it
-  permanent. When the hook and captions burn together the `wm_` copy is a third
-  output of that same ffmpeg (`add_hook_to_video(mark=)`); otherwise
-  `mark_delivery` runs its own pass.
+  permanent. The `wm_` copy is one more output of the ffmpeg that burns the
+  captions (`add_hook_to_video(mark=)` with a hook, `burn_subtitles(mark=)`
+  without); only a clip with no captions gets its own `mark_delivery` pass.
+  Those multi-output passes can segfault on exit after every file is written
+  (`ffmpeg_utils.finished_before_crash` keeps the files then).
 - **hooked_ + subtitled_ from one ffmpeg** (`hooks.add_hook_to_video(also=)`):
   the editor still needs both files (re-caption walks back to hooked_, hook
   replace to the canonical), so nothing is skipped, only one decode.

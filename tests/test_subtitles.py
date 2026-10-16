@@ -1,4 +1,5 @@
 """Tests for subtitle word merging, SRT generation and style sanitizing."""
+import subprocess
 from subtitles import (
     merge_continuation_words,
     generate_srt,
@@ -375,3 +376,61 @@ class TestFilterQuoting:
     def test_plain_path_untouched(self):
         from subtitles import _escape_ffmpeg_filter_value
         assert _escape_ffmpeg_filter_value("/out/subs_0_123.ass") == "/out/subs_0_123.ass"
+
+
+class TestBurnWithMark:
+    """Free plan: the served wm_ copy comes out of the caption burn's decode."""
+
+    def _run(self, monkeypatch, tmp_path, returncode=0, stderr=b"", write=True):
+        import subtitles as m
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            if write:
+                for i, a in enumerate(cmd):
+                    if a.endswith(".mp4") and cmd[i - 1] != "-i":
+                        open(a, "wb").write(b"x" * 10)
+            return subprocess.CompletedProcess(cmd, returncode, b"", stderr)
+        monkeypatch.setattr(m.subprocess, "run", fake_run)
+        monkeypatch.setattr(m.subprocess, "check_output", lambda *a, **k: b"1080x1920\n")
+        srt = tmp_path / "subs.ass"
+        srt.write_text("stub", encoding="utf-8")
+        out, wm = str(tmp_path / "subtitled.mp4"), str(tmp_path / "wm_subtitled.mp4")
+        made = []
+
+        def make_filter(vw, vh, video, logo, out):
+            made.append((vw, vh, video, logo, out))
+            return f"{logo}null[wm];{video}[wm]overlay=54:768{out}"
+        m.burn_subtitles("in.mp4", str(srt), out, mark=("logo.png", make_filter, wm))
+        return captured["cmd"], made, out, wm
+
+    def test_two_outputs_from_one_decode(self, monkeypatch, tmp_path):
+        cmd, made, out, wm = self._run(monkeypatch, tmp_path)
+        assert made == [(1080, 1920, "[sm]", "[1:v]", "[m]")]
+        assert cmd[cmd.index("logo.png") - 1] == "-i"
+        assert ",split=2[s][sm];" in cmd[cmd.index("-filter_complex") + 1]
+        assert cmd.index(out) < cmd.index(wm) and cmd[-1] == wm
+        assert "-vf" not in cmd
+
+    def test_crash_after_both_outputs_finished_is_kept(self, monkeypatch, tmp_path):
+        self._run(monkeypatch, tmp_path, returncode=-11,
+                  stderr=b"muxing overhead: 0.1%\nmuxing overhead: 0.1%\n")
+
+    def test_crash_before_the_copy_finished_fails(self, monkeypatch, tmp_path):
+        import pytest
+        with pytest.raises(Exception, match="FFmpeg failed"):
+            self._run(monkeypatch, tmp_path, returncode=-11, stderr=b"muxing overhead: 0.1%\n")
+
+    def test_without_mark_the_command_is_unchanged(self, monkeypatch, tmp_path):
+        import subtitles as m
+        captured = {}
+        monkeypatch.setattr(m.subprocess, "run",
+                            lambda cmd, **kw: captured.setdefault("cmd", cmd) and
+                            subprocess.CompletedProcess(cmd, 0, b"", b""))
+        srt = tmp_path / "subs.ass"
+        srt.write_text("stub", encoding="utf-8")
+        m.burn_subtitles("in.mp4", str(srt), "out.mp4")
+        cmd = captured["cmd"]
+        assert cmd[:5] == ["ffmpeg", "-y", "-i", "in.mp4", "-vf"]
+        assert cmd[5:8] == [cmd[5], "-c:a", "copy"] and cmd[-1] == "out.mp4"

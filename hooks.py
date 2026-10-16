@@ -6,7 +6,7 @@ import urllib.request
 import uuid
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
-from ffmpeg_utils import video_encode_args, QUALITY, METADATA_SCRUB
+from ffmpeg_utils import video_encode_args, QUALITY, METADATA_SCRUB, finished_before_crash
 
 
 def _truncate_bytes(text, max_bytes):
@@ -467,27 +467,6 @@ def _auto_place(video_path, text, target_box_width, hook_filename, font_scale, s
             "y": round(y, 3), "scale": rel}
 
 
-def _finished_before_crash(result, outputs):
-    """True when ffmpeg died on a signal AFTER finishing every output.
-
-    The multi-output hook pass sometimes segfaults while tearing down, after
-    the last trailer is written: each output's final stats line ("muxing
-    overhead", printed once its trailer and faststart rewrite are done) is
-    already on stderr and the files are complete, byte for byte what a clean
-    exit writes. Treating that as a failure re-ran the whole thing as separate
-    passes for nothing. Anything short of every output finished still fails.
-    """
-    if result.returncode >= 0:
-        return False
-    if (result.stderr or b"").count(b"muxing overhead") < len(outputs):
-        return False
-    if not all(os.path.exists(p) and os.path.getsize(p) > 0 for p in outputs):
-        return False
-    print(f"   ℹ️ ffmpeg exited on signal {-result.returncode} after writing all "
-          f"{len(outputs)} outputs — keeping them.")
-    return True
-
-
 def add_hook_to_video(video_path, text, output_path, position="top", font_scale=1.0, duration=None, style="pill",
                       also=None, font=None, layout_ranges=None, has_captions=True,
                       mark=None):
@@ -615,7 +594,7 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
                 outputs.append(mark[2])
         result = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 timeout=1800)
-        if result.returncode != 0 and not _finished_before_crash(result, outputs):
+        if result.returncode != 0 and not finished_before_crash(result, outputs):
             raise subprocess.CalledProcessError(result.returncode, ffmpeg_cmd,
                                                 result.stdout, result.stderr)
         print(f"✅ Hook added to {output_path}")

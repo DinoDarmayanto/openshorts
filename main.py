@@ -1182,7 +1182,7 @@ def finalize_clip_passthrough(input_video, final_output_video):
 
 
 def auto_caption_clip(clip_path, transcript, clip_start, clip_end, split_ranges=None,
-                      plan_only=False):
+                      plan_only=False, mark=False):
     """Burn the default caption style onto a finished clip.
 
     ``split_ranges``: (start, end) stretches, in clip seconds, rendered with
@@ -1205,6 +1205,9 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end, split_ranges=
 
     ``plan_only`` writes the .ass but burns nothing: returns (vf,
     generation_id) for auto_hook_clip to burn in the same pass as the hook.
+
+    ``mark`` (free plan): the same ffmpeg also writes the served ``wm_`` copy
+    of the captioned file, so mark_delivery finds it made.
     """
     if os.environ.get("AUTO_CAPTIONS", "1").strip() == "0":
         return None
@@ -1263,11 +1266,22 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end, split_ranges=
                 font_name=style["font_name"], font_color=style["font_color"],
                 border_color=style["border_color"], border_width=style["border_width"])
             return vf, generation_id
-        _subs.burn_subtitles(
-            clip_path, ass_path, out_path,
-            alignment=style["alignment"], fontsize=style["font_size"],
-            font_name=style["font_name"], font_color=style["font_color"],
-            border_color=style["border_color"], border_width=style["border_width"])
+        marked = None
+        if mark and os.path.exists(watermark_logo_path()):
+            import watermarked
+            marked = (watermark_logo_path(), watermark_filter,
+                      os.path.join(output_dir, watermarked.marked_name(out_path)))
+        try:
+            _subs.burn_subtitles(
+                clip_path, ass_path, out_path,
+                alignment=style["alignment"], fontsize=style["font_size"],
+                font_name=style["font_name"], font_color=style["font_color"],
+                border_color=style["border_color"], border_width=style["border_width"],
+                mark=marked)
+        except Exception:
+            if marked and os.path.exists(marked[2]):
+                os.remove(marked[2])  # never serve a half-written wm_ copy
+            raise
         print(f"   💬 Captions burned: {os.path.basename(out_path)}")
         return out_path
     except Exception as e:
@@ -2562,7 +2576,8 @@ if __name__ == '__main__':
                         if not captioned:
                             captioned = auto_caption_clip(
                                 deliver_path, transcript, start, end,
-                                split_ranges=split_ranges)
+                                split_ranges=split_ranges,
+                                mark=os.environ.get("WATERMARK") == "1")
                         served = captioned or deliver_path
                         if os.environ.get("WATERMARK") == "1":
                             served = mark_delivery(served)

@@ -229,6 +229,27 @@ def _intermediate_nvenc_args():
             "-b:v", "0", "-pix_fmt", "yuv420p"]
 
 
+def finished_before_crash(result, outputs):
+    """True when ffmpeg died on a signal AFTER finishing every output.
+
+    The multi-output passes (hook, captions, the wm_ copy) sometimes segfault
+    while tearing down, after the last trailer is written: each output's final
+    stats line ("muxing overhead", printed once its trailer and faststart
+    rewrite are done) is already on stderr and the files are complete, byte
+    for byte what a clean exit writes. Treating that as a failure re-ran the whole thing as separate
+    passes for nothing. Anything short of every output finished still fails.
+    """
+    if result.returncode >= 0:
+        return False
+    if (result.stderr or b"").count(b"muxing overhead") < len(outputs):
+        return False
+    if not all(os.path.exists(p) and os.path.getsize(p) > 0 for p in outputs):
+        return False
+    print(f"   ℹ️ ffmpeg exited on signal {-result.returncode} after writing all "
+          f"{len(outputs)} outputs — keeping them.")
+    return True
+
+
 def blurred_backdrop(out_w, out_h, sigma):
     """Filter chain (no labels) filling out_w x out_h with a blurred copy.
 
