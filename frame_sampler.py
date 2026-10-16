@@ -9,6 +9,7 @@ a single forward pass that keeps the frames asked for (prod bench,
 samples of NVENC-cut clips), so every downstream decision stays the same.
 """
 import subprocess
+import tempfile
 
 import cv2
 import numpy as np
@@ -77,11 +78,12 @@ def read_at_path(video_path, cap, indices, max_forward=MAX_FORWARD):
     unique = sorted(set(indices))
     frame_bytes = width * height * 3
     expr = "+".join(f"eq(n,{i})" for i in unique) or "0"
+    errors = tempfile.TemporaryFile()
     proc = subprocess.Popen(
         ["ffmpeg", "-loglevel", "error", *gpu_decode.HW_ARGS, "-i", video_path,
          "-vf", f"select='{expr}',{gpu_decode.DOWNLOAD}", "-fps_mode", "passthrough",
          "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=frame_bytes)
+        stdout=subprocess.PIPE, stderr=errors, bufsize=frame_bytes)
     done = 0           # how many of ``indices`` were answered from the card
     last = (None, None)
     ended = False
@@ -115,6 +117,11 @@ def read_at_path(video_path, cap, indices, max_forward=MAX_FORWARD):
         proc.kill()
         proc.wait()
     gpu_decode.note(True, failed=failed)
+    errors.seek(0)
+    detail = errors.read()[-200:].decode(errors="replace").strip().replace("\n", " | ")
+    errors.close()
     if failed:
-        print("   ⚠️ GPU frame sampling failed, reading the rest on the CPU")
+        print(f"   ⚠️ GPU frame sampling failed (exit {proc.returncode}, "
+              f"{done}/{len(indices)} read: {detail or 'no message'}), "
+              f"reading the rest on the CPU")
         yield from read_at(cap, indices[done:], max_forward)
