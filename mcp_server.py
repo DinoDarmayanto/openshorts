@@ -267,7 +267,9 @@ TOOLS = [
         "description": (
             "Re-render one clip from a new list of source-video segments (the "
             "same engine behind the dashboard's clip editor). Times are seconds "
-            "in the ORIGINAL source video; segments are concatenated in the "
+            "in the ORIGINAL source video: start from the clip's source_segments "
+            "in list_clips (e.g. end 5 s earlier = lower the last end by 5). "
+            "Segments are concatenated in the "
             "given order, so you can trim, extend, drop a dead moment in the "
             "middle, or reorder. Segments inside the clip's original range "
             "re-render in seconds; going outside needs the retained source "
@@ -437,6 +439,17 @@ async def _tool_get_job_status(client, args):
     return out, data.get("status") == "failed"
 
 
+def _source_segments(clip):
+    # Where the clip sits in the ORIGINAL video: what recut_clip edits. A clip
+    # that was already recut carries its exact segment list in its recipe.
+    recipe = (clip.get("recipe") or {}).get("segments")
+    if recipe:
+        return [{"start": s["start"], "end": s["end"]} for s in recipe]
+    if isinstance(clip.get("start"), (int, float)) and isinstance(clip.get("end"), (int, float)):
+        return [{"start": clip["start"], "end": clip["end"]}]
+    return []
+
+
 def _clip_summaries(job_id, result):
     base = os.environ.get("PUBLIC_API_URL", "").rstrip("/")
     out = []
@@ -449,6 +462,7 @@ def _clip_summaries(job_id, result):
                                  if isinstance(clip.get("start"), (int, float))
                                  and isinstance(clip.get("end"), (int, float)) else None),
             "video_url": f"{base}{rel}" if base and rel.startswith("/") else rel,
+            "source_segments": _source_segments(clip),
             "youtube_title": clip.get("video_title_for_youtube_short"),
             "tiktok_description": clip.get("video_description_for_tiktok"),
             "instagram_description": clip.get("video_description_for_instagram"),
@@ -603,7 +617,8 @@ async def handle_message(msg, tool_caller) -> Optional[dict]:
     if method == "tools/list":
         return _rpc_result(msg_id, {"tools": TOOLS})
     if method == "resources/list":
-        return _rpc_result(msg_id, {"resources": mcp_ui.RESOURCES})
+        return _rpc_result(msg_id, {"resources": [
+            {**r, "_meta": mcp_ui.widget_meta()} for r in mcp_ui.RESOURCES]})
     if method == "resources/templates/list":
         return _rpc_result(msg_id, {"resourceTemplates": []})
     if method == "resources/read":
@@ -615,6 +630,7 @@ async def handle_message(msg, tool_caller) -> Optional[dict]:
                 "uri": uri,
                 "mimeType": mcp_ui.MIME_TYPE,
                 "text": mcp_ui.clip_picker_html(),
+                "_meta": mcp_ui.widget_meta(),
             }]})
         return _rpc_error(msg_id, -32002, f"Resource not found: {uri}")
     if method == "tools/call":
@@ -630,6 +646,7 @@ async def handle_message(msg, tool_caller) -> Optional[dict]:
                 "uri": f"{mcp_ui.CLIP_PICKER_URI}/{result.get('job_id', 'result')}",
                 "mimeType": mcp_ui.MIME_TYPE,
                 "text": mcp_ui.clip_picker_html(result),
+                "_meta": mcp_ui.widget_meta(),
             }})
         return _rpc_result(msg_id, {
             "content": content,

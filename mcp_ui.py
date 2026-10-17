@@ -15,9 +15,13 @@ One template, three data paths, because the ecosystem hasn't converged:
      from resources/read and push render data after the iframe reports ready.
 
 The iframe cannot fetch anything (host CSP), so the video previews use the
-clips' absolute URLs and everything else is inline.
+clips' absolute URLs and everything else is inline. Those URLs are on
+PUBLIC_API_URL, which ``widget_meta`` declares as a media domain: without it
+ChatGPT's sandbox blocks the <video> loads and the previews stay black.
 """
 import json
+import os
+from urllib.parse import urlsplit
 
 CLIP_PICKER_URI = "ui://openshorts/clip-picker"
 MIME_TYPE = "text/html;profile=mcp-app"
@@ -182,6 +186,17 @@ else if (!fromOpenai()) {
 </body>
 </html>
 """
+
+
+def widget_meta() -> dict:
+    """CSP for the picker in both host dialects (ChatGPT Apps SDK, MCP Apps)."""
+    parts = urlsplit(os.environ.get("PUBLIC_API_URL", ""))
+    domains = [f"{parts.scheme}://{parts.netloc}"] if parts.scheme and parts.netloc else []
+    return {
+        "openai/widgetCSP": {"connect_domains": [], "resource_domains": domains},
+        "openai/widgetPrefersBorder": True,
+        "ui": {"csp": {"connectDomains": [], "resourceDomains": domains}},
+    }
 
 
 def clip_picker_html(data=None) -> str:

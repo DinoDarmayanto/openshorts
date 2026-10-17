@@ -40,6 +40,15 @@ class TestResourceSurface:
         assert "__OPENSHORTS_DATA__" not in content["text"]
         assert "var inline = null;" in content["text"]
 
+    def test_template_declares_the_video_host_as_media_domain(self, monkeypatch):
+        # Without it ChatGPT's widget sandbox blocks the <video> previews.
+        monkeypatch.setenv("PUBLIC_API_URL", "https://api.example.com/")
+        meta = _run(_req("resources/read", {"uri": mcp_ui.CLIP_PICKER_URI}))["result"]["contents"][0]["_meta"]
+        assert meta["openai/widgetCSP"]["resource_domains"] == ["https://api.example.com"]
+        assert meta["ui"]["csp"]["resourceDomains"] == ["https://api.example.com"]
+        monkeypatch.delenv("PUBLIC_API_URL")
+        assert mcp_ui.widget_meta()["openai/widgetCSP"]["resource_domains"] == []
+
     def test_resources_read_accepts_per_call_uris(self):
         resp = _run(_req("resources/read", {"uri": mcp_ui.CLIP_PICKER_URI + "/job42"}))
         assert resp["result"]["contents"][0]["uri"].endswith("/job42")

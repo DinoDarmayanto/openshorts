@@ -91,3 +91,17 @@ class TestTools:
                      "params": {"name": "get_quota", "arguments": {}}},
                     tool_caller=_err_tool)
         assert resp["result"]["isError"] is True
+
+
+class TestClipSummaries:
+    def test_source_segments_tell_recut_where_the_clip_is(self):
+        from mcp_server import _clip_summaries
+        clips = _clip_summaries("j", {"clips": [
+            {"start": 10.0, "end": 40.5, "video_url": "/videos/j/a.mp4"},
+            {"start": 5, "end": 30, "recipe": {"segments": [
+                {"start": 5, "end": 12, "text": "x"}, {"start": 20, "end": 30}]}},
+            {"video_url": "/videos/j/c.mp4"},
+        ]})
+        assert clips[0]["source_segments"] == [{"start": 10.0, "end": 40.5}]
+        assert clips[1]["source_segments"] == [{"start": 5, "end": 12}, {"start": 20, "end": 30}]
+        assert clips[2]["source_segments"] == []
