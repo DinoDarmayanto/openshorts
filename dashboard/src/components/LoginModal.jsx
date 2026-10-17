@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Mail, Check, Loader2 } from 'lucide-react';
+import { Mail, Lock, Check, Loader2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import Modal from './ui/Modal';
 
@@ -8,8 +8,10 @@ import Modal from './ui/Modal';
 // request is parked: the work resumes by itself once they are back, and saying
 // so is the difference between a sign-in wall and a saved job.
 export default function LoginModal({ onClose, queued = false }) {
-  const { requestMagicLink, loginWithGoogle, googleAuthEnabled } = useAuth();
+  const { requestMagicLink, loginWithPassword, loginWithGoogle, googleAuthEnabled } = useAuth();
   const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [needsPassword, setNeedsPassword] = useState(false);
   const [sent, setSent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -20,8 +22,14 @@ export default function LoginModal({ onClose, queued = false }) {
     setBusy(true);
     setError('');
     try {
-      await requestMagicLink(email.trim());
-      setSent(true);
+      if (needsPassword) {
+        await loginWithPassword(email.trim(), password);
+        onClose();
+        return;
+      }
+      const { passwordRequired } = await requestMagicLink(email.trim());
+      if (passwordRequired) setNeedsPassword(true);
+      else setSent(true);
     } catch (err) {
       setError(err.message || 'Something went wrong.');
     } finally {
@@ -62,13 +70,26 @@ export default function LoginModal({ onClose, queued = false }) {
                 autoFocus
               />
             </div>
+            {needsPassword && (
+              <div className="relative">
+                <Lock size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="password"
+                  className="input-field pl-10"
+                  autoFocus
+                />
+              </div>
+            )}
             {error && <p className="text-danger text-sm">{error}</p>}
             <button
               type="submit"
-              disabled={busy || !email.trim()}
+              disabled={busy || !email.trim() || (needsPassword && !password)}
               className="btn-primary w-full"
             >
-              {busy ? <Loader2 size={18} className="animate-spin" /> : 'Email me a sign-in link'}
+              {busy ? <Loader2 size={18} className="animate-spin" /> : needsPassword ? 'Sign in' : 'Email me a sign-in link'}
             </button>
           </form>
 

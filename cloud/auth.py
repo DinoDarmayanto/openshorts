@@ -8,6 +8,7 @@
 - /api/me returns the user's plan + minute balance (no Stripe call needed).
 """
 import hashlib
+import hmac
 import secrets
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -167,6 +168,9 @@ async def request_magic_link(payload: MagicLinkRequest, request: Request):
     # Normalize (strip +tags / Gmail dots) so aliases can't mint extra accounts.
     email = email_policy.normalize_email(payload.email)
 
+    if review_login_enabled() and email == _review_email():
+        return {"ok": True, "password_required": True}
+
     # Best-effort: uvicorn resolves this from X-Forwarded-For (trusted "*" in
     # the Dockerfile), which a client can forge — good enough against the bots
     # we actually see, but not a security boundary.
@@ -285,6 +289,49 @@ async def verify_magic_link(payload: MagicVerifyRequest):
                 user.last_login_at = _now()
             user_id, user_email = user.id, user.email
 
+        token = issue_jwt(user_id, user_email)
+        cu = await _load_current_user(session, user_id)
+    return {"token": token, "user": {"id": str(user_id), "email": user_email, "entitled": cu.entitled}}
+
+
+# --------------------------------------------------------------------------- #
+# Reviewer sign-in (ChatGPT app directory)
+# --------------------------------------------------------------------------- #
+class ReviewLoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+def review_login_enabled() -> bool:
+    return bool(settings.review_login_email and settings.review_login_password)
+
+
+def _review_email() -> str:
+    return email_policy.normalize_email(settings.review_login_email)
+
+
+@router.post("/api/auth/review-login")
+async def review_login(payload: ReviewLoginRequest):
+    """Password sign-in for the single account named by REVIEW_LOGIN_EMAIL.
+
+    Directory reviewers test the OAuth connection from their own browser and
+    cannot open a magic link sent to our test inbox. Only that existing account
+    can sign in this way, and only while both env vars are set."""
+    email = email_policy.normalize_email(payload.email)
+    ok = (review_login_enabled()
+          and hmac.compare_digest(email, _review_email())
+          and hmac.compare_digest(payload.password.encode(), settings.review_login_password.encode()))
+    if not ok:
+        raise HTTPException(status_code=401, detail="Wrong email or password.")
+    async with database.session() as session:
+        async with session.begin():
+            user = (await session.execute(
+                select(User).where(User.email == email)
+            )).scalar_one_or_none()
+            if user is None:
+                raise HTTPException(status_code=401, detail="Wrong email or password.")
+            user.last_login_at = _now()
+            user_id, user_email = user.id, user.email
         token = issue_jwt(user_id, user_email)
         cu = await _load_current_user(session, user_id)
     return {"token": token, "user": {"id": str(user_id), "email": user_email, "entitled": cu.entitled}}

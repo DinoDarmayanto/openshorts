@@ -126,8 +126,22 @@ export function AuthProvider({ children }) {
     });
     if (res.status === 429) throw new Error('Too many attempts. Try again in a few minutes.');
     if (!res.ok) throw new Error('Could not send sign-in link.');
-    return true;
+    // The app-directory review account signs in with a password instead.
+    const data = await res.json().catch(() => ({}));
+    return { passwordRequired: !!data.password_required };
   }, []);
+
+  const loginWithPassword = useCallback(async (email, password) => {
+    const res = await apiFetch('/api/auth/review-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    if (!res.ok) throw new Error('Wrong email or password.');
+    const data = await res.json();
+    setToken(data.token);
+    await refreshMe();
+  }, [refreshMe]);
 
   const loginWithGoogle = useCallback(() => {
     window.location.href = getApiUrl('/api/auth/google');
@@ -156,6 +170,7 @@ export function AuthProvider({ children }) {
     isManaged: !!(config.billingEnabled && me?.entitled),
     refreshMe,
     requestMagicLink,
+    loginWithPassword,
     loginWithGoogle,
     logout,
   };

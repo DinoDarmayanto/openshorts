@@ -243,6 +243,16 @@ class Settings:
         # /.well-known/openai-apps-challenge (404 while unset).
         return os.environ.get("OPENAI_APPS_CHALLENGE", "").strip()
 
+    @property
+    def review_login_email(self) -> str:
+        # App-directory reviewers cannot receive a magic link: this one account
+        # signs in with REVIEW_LOGIN_PASSWORD instead. Off while either is unset.
+        return os.environ.get("REVIEW_LOGIN_EMAIL", "").strip().lower()
+
+    @property
+    def review_login_password(self) -> str:
+        return os.environ.get("REVIEW_LOGIN_PASSWORD", "")
+
     # Telegram (optional) — real-time admin alerts (purchases, churn, outages)
     @property
     def telegram_bot_token(self) -> str:
