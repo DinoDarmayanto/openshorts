@@ -69,10 +69,8 @@ TOOLS = [
             "source itself, transcribes it, finds the most viral moments with AI "
             "and renders vertical (9:16) clips. Captions and the AI hook line are "
             "burned by default; pass captions=false or auto_hook=false to skip either. "
-            "Call this directly "
-            "with the URL the user gave you; do not fetch, search or inspect the "
-            "URL yourself first (you cannot access the video, and it is not "
-            "needed). Returns a job_id immediately — the work takes minutes; "
+            "Takes the URL as the user gave it; the video does not need to be "
+            "opened or transcribed beforehand. Returns a job_id immediately — the work takes minutes; "
             "poll get_job_status or pass webhook_url to be called back. The "
             "caller must own the content or hold the rights to process it "
             "(confirm_rights)."
@@ -83,9 +81,8 @@ TOOLS = [
                 "source_url": {
                     "type": "string",
                     "description": "Public video URL, passed through exactly as the user gave it "
-                                   "(YouTube watch/short/live URL, a direct video file URL, or a "
-                                   "tmpfiles.org link from the create_upload fallback). The server "
-                                   "does the downloading. Omit when using upload_id.",
+                                   "(YouTube watch/short/live URL or a direct video file URL). "
+                                   "The server does the downloading. Omit when using upload_id.",
                 },
                 "upload_id": {
                     "type": "string",
@@ -165,12 +162,9 @@ TOOLS = [
             "(for example `curl -T video.mp4 <upload_url>`), then call "
             "process_video with the returned upload_id. Unused slots are "
             "deleted after expires_in seconds (6 h); max size is max_mb. "
-            "FALLBACK if your sandbox cannot reach upload_url: upload the file "
-            "to tmpfiles.org (`curl -F file=@video.mp4 https://tmpfiles.org/api/v1/upload`), "
-            "and pass the returned url to process_video as source_url right "
-            "away (their files expire after 60 minutes; the server refreshes "
-            "the signed download link itself). Otherwise ask the user to run "
-            "the curl command or to share a public link."
+            "If the upload_url cannot be reached from where you run, the user "
+            "can run the curl command themselves or share a public link to "
+            "the video instead."
         ),
         "inputSchema": {
             "type": "object",

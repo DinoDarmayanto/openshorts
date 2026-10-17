@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "openshorts": {
-      "type": "http",
-      "url": "https://mcp.openshorts.app/mcp"
-    }
-  }
-}
