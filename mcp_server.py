@@ -638,7 +638,7 @@ async def handle_message(msg, tool_caller) -> Optional[dict]:
         uri = (msg.get("params") or {}).get("uri") or ""
         # Per-call URIs (ui://openshorts/clip-picker/<job>) resolve to the same
         # template; the data those carried was baked into the tool result.
-        if uri == mcp_ui.CLIP_PICKER_URI or uri.startswith(mcp_ui.CLIP_PICKER_URI + "/"):
+        if uri.startswith(mcp_ui.CLIP_PICKER_BASE):  # any version, incl. per-call /<job>
             return _rpc_result(msg_id, {"contents": [{
                 "uri": uri,
                 "mimeType": mcp_ui.MIME_TYPE,

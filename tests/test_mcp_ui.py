@@ -114,3 +114,12 @@ class TestTemplateSafety:
         # Repeated openai:set_globals must not rebuild the <video> elements.
         html = mcp_ui.clip_picker_html()
         assert "if (key === rendered) return;" in html
+
+    def test_template_uri_changes_with_the_html(self):
+        # Hosts cache templates by URI: a new HTML must get a new URI.
+        import hashlib
+        h = hashlib.sha256(mcp_ui._TEMPLATE.encode()).hexdigest()[:10]
+        assert mcp_ui.CLIP_PICKER_URI == mcp_ui.CLIP_PICKER_BASE + "-" + h
+        # The pre-versioning URI still resolves for hosts that cached it.
+        resp = _run(_req("resources/read", {"uri": mcp_ui.CLIP_PICKER_BASE}))
+        assert "result" in resp

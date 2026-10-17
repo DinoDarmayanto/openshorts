@@ -19,26 +19,12 @@ clips' absolute URLs and everything else is inline. Those URLs are on
 PUBLIC_API_URL, which ``widget_meta`` declares as a media domain: without it
 ChatGPT's sandbox blocks the <video> loads and the previews stay black.
 """
+import hashlib
 import json
 import os
 from urllib.parse import urlsplit
 
-CLIP_PICKER_URI = "ui://openshorts/clip-picker"
 MIME_TYPE = "text/html;profile=mcp-app"
-
-RESOURCES = [
-    {
-        "uri": CLIP_PICKER_URI,
-        "name": "clip-picker",
-        "title": "OpenShorts clip picker",
-        "description": (
-            "Interactive picker for a job's finished clips: preview each 9:16 "
-            "clip, select the keepers and publish them to TikTok, Instagram or "
-            "YouTube without leaving the conversation."
-        ),
-        "mimeType": MIME_TYPE,
-    },
-]
 
 # Kept as a plain string with a token instead of an f-string: the JS is full of
 # braces and escaping them all is how bugs get in.
@@ -215,6 +201,26 @@ else if (!fromOpenai()) {
 </body>
 </html>
 """
+
+# Hosts cache a template by its URI (ChatGPT kept rendering the first version it
+# saw), so the URI carries a hash of the HTML: any change is a new template.
+CLIP_PICKER_BASE = "ui://openshorts/clip-picker"
+CLIP_PICKER_URI = (CLIP_PICKER_BASE + "-"
+                   + hashlib.sha256(_TEMPLATE.encode()).hexdigest()[:10])
+
+RESOURCES = [
+    {
+        "uri": CLIP_PICKER_URI,
+        "name": "clip-picker",
+        "title": "OpenShorts clip picker",
+        "description": (
+            "Interactive picker for a job's finished clips: preview each 9:16 "
+            "clip, select the keepers and publish them to TikTok, Instagram or "
+            "YouTube without leaving the conversation."
+        ),
+        "mimeType": MIME_TYPE,
+    },
+]
 
 
 def widget_meta() -> dict:
