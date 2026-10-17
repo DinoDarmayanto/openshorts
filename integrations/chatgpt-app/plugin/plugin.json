@@ -105,7 +105,8 @@
           ]
         },
         "commerce": false,
-        "commerce_description": "OpenShorts does not sell anything inside ChatGPT. Processing uses minutes from the user's own OpenShorts account; when it runs out, the tool returns a link to openshorts.app and the user decides there."
+        "commerce_description": "OpenShorts does not sell anything inside ChatGPT. Processing uses minutes from the user's own OpenShorts account; when it runs out, the tool returns a link to openshorts.app and the user decides there.",
+        "demo_recording_url": "https://www.openshorts.app/demo/chatgpt-app-walkthrough.mp4"
       },
       "publication": {
         "release_notes": "First release: clip long videos into vertical shorts with captions and titles, restyle captions, re-cut clips and publish to TikTok, Instagram Reels and YouTube Shorts.",
