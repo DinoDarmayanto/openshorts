@@ -35,7 +35,7 @@ from typing import Optional
 from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -156,6 +156,16 @@ async def protected_resource(request: Request):
 async def authorization_server(request: Request):
     return JSONResponse(server_metadata(base_url(request)),
                         headers={"Access-Control-Allow-Origin": "*"})
+
+
+@router.get("/.well-known/openai-apps-challenge", include_in_schema=False)
+async def openai_apps_challenge():
+    # The ChatGPT app portal fetches this on the MCP host and expects the
+    # exact token as plain text, nothing else.
+    token = settings.openai_apps_challenge
+    if not token:
+        raise HTTPException(status_code=404, detail="not configured")
+    return PlainTextResponse(token, headers={"Cache-Control": "no-store"})
 
 
 # --------------------------------------------------------------------------- #

@@ -68,6 +68,16 @@ class TestTools:
             for req in tool["inputSchema"].get("required", []):
                 assert req in tool["inputSchema"]["properties"], tool["name"]
 
+    def test_every_tool_declares_behaviour_hints(self):
+        # The ChatGPT app review rejects a tool missing any of these three.
+        for tool in TOOLS:
+            hints = tool["annotations"]
+            for key in ("readOnlyHint", "destructiveHint", "openWorldHint"):
+                assert isinstance(hints[key], bool), (tool["name"], key)
+        by_name = {t["name"]: t["annotations"] for t in TOOLS}
+        assert by_name["publish_clip"]["openWorldHint"] is True
+        assert by_name["get_quota"]["readOnlyHint"] is True
+
     def test_call_wraps_result_as_text_and_structured(self):
         resp = _run({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
                      "params": {"name": "get_quota", "arguments": {"a": 1}}})

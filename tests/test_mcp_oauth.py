@@ -69,6 +69,15 @@ class TestDiscoveryEndpoints:
             body = r.json()
             assert ("resource" in body) or ("issuer" in body)
 
+    def test_openai_apps_challenge(self, monkeypatch):
+        c = self._client()
+        monkeypatch.delenv("OPENAI_APPS_CHALLENGE", raising=False)
+        assert c.get("/.well-known/openai-apps-challenge").status_code == 404
+        monkeypatch.setenv("OPENAI_APPS_CHALLENGE", " tok123 ")
+        r = c.get("/.well-known/openai-apps-challenge")
+        assert r.status_code == 200 and r.text == "tok123"
+        assert r.headers["content-type"].startswith("text/plain")
+
     def test_register_rejects_bad_redirects_and_secrets(self):
         c = self._client()
         r = c.post("/oauth/register", json={"client_name": "x", "redirect_uris": ["http://evil.com/cb"]})

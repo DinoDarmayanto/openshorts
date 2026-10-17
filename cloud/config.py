@@ -237,6 +237,12 @@ class Settings:
         # Where operational alerts (proxy out of credits, high failure rate) go.
         return os.environ.get("ADMIN_EMAIL", "")
 
+    @property
+    def openai_apps_challenge(self) -> str:
+        # Domain-verification token from the ChatGPT app portal, served at
+        # /.well-known/openai-apps-challenge (404 while unset).
+        return os.environ.get("OPENAI_APPS_CHALLENGE", "").strip()
+
     # Telegram (optional) — real-time admin alerts (purchases, churn, outages)
     @property
     def telegram_bot_token(self) -> str:

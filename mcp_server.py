@@ -339,6 +339,24 @@ TOOLS = [
     },
 ]
 
+# Behaviour hints hosts use to decide what needs the user's confirmation; the
+# ChatGPT app review requires all three on every tool. openWorld = reaches past
+# the user's OpenShorts account (fetches an outside URL, posts publicly).
+_READ = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False, "idempotentHint": True}
+_ANNOTATIONS = {
+    "process_video": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+    "create_upload": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+    "get_job_status": _READ,
+    "list_clips": _READ,
+    "get_quota": _READ,
+    "add_subtitles": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+    # Replaces the clip's current render with the new cut.
+    "recut_clip": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": False},
+    "publish_clip": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+}
+for _tool in TOOLS:
+    _tool["annotations"] = {"title": _tool["title"], **_ANNOTATIONS[_tool["name"]]}
+
 
 # --------------------------------------------------------------------------- #
 # Internal dispatch: each tool is an in-process call to the existing REST API.
