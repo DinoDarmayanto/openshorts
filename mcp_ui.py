@@ -139,11 +139,6 @@ function render(data) {
         card.appendChild(a);
       };
       v.addEventListener('error', fallback);
-      var dbg = document.createElement('div'); dbg.className = 'd'; card.appendChild(dbg);
-      setInterval(function () {
-        dbg.textContent = 'v3 rs' + v.readyState + ' ns' + v.networkState +
-          (v.error ? ' e' + v.error.code : '') + ' ' + (v.currentSrc || '').slice(0, 40);
-      }, 1000);
       setTimeout(function () { if (v.readyState < 1) fallback(); }, 8000);
     }
     var t = document.createElement('div');
