@@ -63,6 +63,7 @@ padding:8px;cursor:pointer}
 .card .t{margin-top:6px;font-size:12px;color:var(--ink);line-height:1.3;
 display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .card .d{font-size:11px;color:var(--muted);margin-top:2px}
+.card .open{display:block;font-size:11px;color:var(--brass);margin-top:4px}
 .bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px}
 .chip{border:1px solid var(--rule);border-radius:999px;padding:4px 12px;font-size:12px;
 cursor:pointer;user-select:none;color:var(--muted)}
@@ -132,6 +133,27 @@ function render(data) {
       v.src = clip.video_url;
       v.muted = true; v.controls = true; v.playsInline = true; v.preload = 'metadata';
       card.appendChild(v);
+      // Some hosts sandbox media; when the preview can't load, the clip is
+      // still one click away.
+      var fallback = function () {
+        if (card.querySelector('.open')) return;
+        var a = document.createElement('a');
+        a.className = 'open';
+        a.href = clip.video_url; a.target = '_blank'; a.rel = 'noopener';
+        a.textContent = 'Open clip ↗';
+        a.title = 'preview state ' + v.readyState + '/' + v.networkState +
+          (v.error ? ' error ' + v.error.code : '');
+        a.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          if (window.openai && window.openai.openExternal) {
+            ev.preventDefault();
+            window.openai.openExternal({href: clip.video_url});
+          }
+        });
+        card.appendChild(a);
+      };
+      v.addEventListener('error', fallback);
+      setTimeout(function () { if (v.readyState < 1) fallback(); }, 8000);
     }
     var t = document.createElement('div');
     t.className = 't';
