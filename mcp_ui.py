@@ -87,6 +87,7 @@ button:disabled{opacity:.4;cursor:default}
 <script>
 var inline = __OPENSHORTS_DATA__;
 var state = null;
+var rendered = null;
 var selected = {};
 
 function callTool(name, params) {
@@ -110,6 +111,12 @@ function refreshButton() {
 }
 
 function render(data) {
+  // ChatGPT fires openai:set_globals on every height, theme or layout change.
+  // Rebuilding the grid each time recreated the <video> elements, which then
+  // restarted their load forever and never showed a frame.
+  var key = JSON.stringify(data);
+  if (key === rendered) return;
+  rendered = key;
   state = data;
   var clips = data.clips || [];
   document.getElementById('hd').textContent =

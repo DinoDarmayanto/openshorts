@@ -109,3 +109,8 @@ class TestTemplateSafety:
             # No external fetches: host CSPs block them and the picker must
             # render anyway. (Clip video URLs are data, not template.)
             assert marker not in html
+
+    def test_render_is_skipped_for_unchanged_data(self):
+        # Repeated openai:set_globals must not rebuild the <video> elements.
+        html = mcp_ui.clip_picker_html()
+        assert "if (key === rendered) return;" in html
