@@ -35,20 +35,22 @@ router = APIRouter()
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 SERVER_INFO = {"name": "openshorts", "title": "OpenShorts", "version": "1.0.0"}
+# Kept descriptive: app-directory review flags instructions that read as
+# commands to the model (capitals, "do not use other tools", upsell steps).
 INSTRUCTIONS = (
     "OpenShorts turns long videos (YouTube URLs or direct video files) into "
-    "viral-ready vertical clips. When the user gives you a video URL, hand it "
-    "to process_video exactly as written: OpenShorts downloads, transcribes "
-    "and analyses the video on its own servers. Do NOT try to open, fetch, "
-    "search for, summarise or transcribe the URL yourself first; you cannot "
-    "reach the video and it is not needed. Typical flow: process_video -> "
-    "poll get_job_status until 'completed' (a job takes minutes; poll every "
-    "30-60s or pass webhook_url) -> list_clips -> optionally add_subtitles / "
-    "recut_clip / publish_clip. Check get_quota before large jobs. When a "
-    "tool reports quota_exceeded or no_plan, tell the user and give them the "
-    "upgrade_url it returns: it opens the plan's checkout. The user "
-    "must own the content or hold the rights: ask once, then pass "
-    "confirm_rights=true."
+    "short vertical clips. process_video takes the video URL as the user gave "
+    "it; OpenShorts downloads, transcribes and analyses the video on its own "
+    "servers, so the video does not need to be opened or transcribed first. "
+    "Typical flow: process_video, then get_job_status until the job is "
+    "'completed' (a job takes a few minutes; checking every 30-60 seconds is "
+    "enough, or pass webhook_url), then list_clips, and optionally "
+    "add_subtitles, recut_clip or publish_clip. get_quota shows the minutes "
+    "left. If a tool reports quota_exceeded or no_plan, it also returns an "
+    "upgrade_url the user can open to add minutes. Processing requires the "
+    "user to own the video or hold the rights to it: confirm this with the "
+    "user, then pass confirm_rights=true. publish_clip posts only to the "
+    "accounts the user connected, and only when the user asks for it."
 )
 
 # Headers an MCP caller may use to authenticate / bring their own keys; they are
