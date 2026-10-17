@@ -427,8 +427,21 @@ async def _tool_create_upload(client, args):
     return resp.json(), False
 
 
+async def _job_call(client, method, path, job_id, **kw):
+    # Cloud jobs leave local disk an hour after they finish (their clips live
+    # on in R2), so an agent coming back later gets 404 "Job not found". Bring
+    # the project back the way the dashboard reopens one, then retry once.
+    send = getattr(client, method.lower())
+    resp = await send(path, **kw)
+    if resp.status_code == 404:
+        restored = await client.post(f"/api/projects/{job_id}/restore")
+        if restored.status_code < 400:
+            resp = await send(path, **kw)
+    return resp
+
+
 async def _tool_get_job_status(client, args):
-    resp = await client.get(f"/api/status/{args['job_id']}")
+    resp = await _job_call(client, "GET", f"/api/status/{args['job_id']}", args["job_id"])
     if resp.status_code >= 400:
         return _api_error(resp), True
     data = resp.json()
@@ -519,7 +532,7 @@ async def _tool_add_subtitles(client, args):
                                    CAPTION_PRESETS["default"])
         body["max_chars"] = line_budget(body.get("font_name", base["font_name"]),
                                         body.get("font_size", base["font_size"]))
-    resp = await client.post("/api/subtitle", json=body)
+    resp = await _job_call(client, "POST", "/api/subtitle", args["job_id"], json=body)
     if resp.status_code >= 400:
         return _api_error(resp), True
     return resp.json(), False
@@ -531,7 +544,7 @@ async def _tool_recut_clip(client, args):
     for k in ("snap_to_words", "reapply_captions", "framing"):
         if args.get(k) is not None:
             body[k] = args[k]
-    resp = await client.post("/api/clip/rerender", json=body)
+    resp = await _job_call(client, "POST", "/api/clip/rerender", args["job_id"], json=body)
     if resp.status_code >= 400:
         return _api_error(resp), True
     return resp.json(), False
@@ -543,7 +556,7 @@ async def _tool_publish_clip(client, args):
     for k in ("title", "description", "scheduled_date", "timezone"):
         if args.get(k) is not None:
             body[k] = args[k]
-    resp = await client.post("/api/social/post", json=body)
+    resp = await _job_call(client, "POST", "/api/social/post", args["job_id"], json=body)
     if resp.status_code >= 400:
         return _api_error(resp), True
     return resp.json(), False

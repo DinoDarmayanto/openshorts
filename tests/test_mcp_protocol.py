@@ -105,3 +105,34 @@ class TestClipSummaries:
         assert clips[0]["source_segments"] == [{"start": 10.0, "end": 40.5}]
         assert clips[1]["source_segments"] == [{"start": 5, "end": 12}, {"start": 20, "end": 30}]
         assert clips[2]["source_segments"] == []
+
+
+class TestExpiredJobs:
+    def _client(self, on_disk):
+        import httpx
+        calls = []
+
+        def handler(req):
+            calls.append((req.method, req.url.path))
+            if req.url.path.endswith("/restore"):
+                on_disk.append(True)
+                return httpx.Response(200, json={"status": "completed"})
+            if not on_disk:
+                return httpx.Response(404, json={"detail": "Job not found"})
+            return httpx.Response(200, json={"status": "completed", "result": {"clips": []}})
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler),
+                                 base_url="http://api"), calls
+
+    def test_a_job_gone_from_disk_is_restored_from_the_archive(self):
+        from mcp_server import _tool_get_job_status
+        client, calls = self._client([])
+        out, is_error = asyncio.run(_tool_get_job_status(client, {"job_id": "j"}))
+        assert not is_error and out["status"] == "completed"
+        assert calls == [("GET", "/api/status/j"), ("POST", "/api/projects/j/restore"),
+                         ("GET", "/api/status/j")]
+
+    def test_a_live_job_is_not_restored(self):
+        from mcp_server import _tool_get_job_status
+        client, calls = self._client([True])
+        asyncio.run(_tool_get_job_status(client, {"job_id": "j"}))
+        assert calls == [("GET", "/api/status/j")]
