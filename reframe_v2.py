@@ -711,7 +711,7 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
             strategies[scene_idx] = plan
             splits.pop(start_f, None)
             if plan == 'SCREENCAST':
-                screencasts[start_f] = centre
+                screencasts[start_f] = centre  # (face centre, content columns)
             elif plan == 'INSET':
                 insets[start_f] = box
                 inset_count += 1
@@ -790,7 +790,7 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
                     orig_w, orig_h, out_w, out_h, insets.get(start_f, inset))
             elif strategy == 'SCREENCAST':
                 graph = screencast_layout.screencast_filtergraph(
-                    orig_w, orig_h, out_w, out_h, screencasts[start_f])
+                    orig_w, orig_h, out_w, out_h, *screencasts[start_f])
             elif strategy == 'WIDE' and start_f in focus_crops:
                 graph = screencast_layout.focus_filtergraph(
                     orig_w, orig_h, out_w, out_h, focus_crops[start_f])

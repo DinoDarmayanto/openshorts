@@ -118,8 +118,16 @@ width, so an explicit GENERAL override on a portrait clip cannot shrink it.
   1024px still per shot, one Gemini call per clip, a closed choice per shot
   (`screen` / `beside` / `camera`, `gemini_worker.SHOT_CONTENT_PROMPT`) plus the
   horizontal **reading area** of a screen. `camera` shots keep the face
-  classifier's verdict. `beside` (width 0.7) stacks the content over the
-  presenter as SCREENCAST. `screen` (width 1.0: the presenter, if any, is
+  classifier's verdict. `beside` (width 0.7) stacks **only the content
+  columns** (the side away from the presenter's body, `content_side`) over the
+  face-framed presenter as SCREENCAST; stacking the whole frame showed the
+  presenter twice, and a presenter who leaves less than 30% of the width
+  beside them is not stacked. A `screen` or `beside` scene with a person
+  standing in it at full size (YOLO body at least 60% of the frame height,
+  `_filmed_person`) is a filmed room, a whiteboard or TV behind the presenter,
+  and keeps the face classifier's verdict: Gemini answers `beside` or
+  `screen` for that shot whatever the prompt says (measured 17-oct-2026), while
+  a presenter laid over a screen measures 22-40% of the height. `screen` (width 1.0: the presenter, if any, is
   composited on top of it, and stacking would show it twice) gets WIDE, cropped
   to the reading area when that is narrower than 90% of the frame
   (`focus_crop`, never past 60% of the output height, full source height kept);
@@ -141,7 +149,10 @@ width, so an explicit GENERAL override on a portrait clip cannot shrink it.
   (offered as a fourth option it answered `screencast` and overall accuracy
   dropped). The geometric detector needs three filters: a **small** subject,
   **horizontally off-centre** (a talking-head face is centred even when high),
-  and **still between samples**.
+  and **still between samples**. A **face** detection is grown to three face
+  widths (the webcam's head-and-shoulders framing) and the box never starts
+  below the head (`FACE_HEADROOM`): grown like YOLO's torso box and pinned to
+  the bottom edge it cut the forehead off.
 - **ALTERNATE** (`active_speaker.py`, `SPEAKER_SIGNAL=1` + `SPEAKER_CUT=1`):
   hard cuts to whoever is talking, rendered through the TRACK path as a
   trajectory with jumps. `SPEAKER_SIGNAL=1` alone just gates SPLIT on both people

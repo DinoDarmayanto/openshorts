@@ -61,19 +61,25 @@ MIN_OVERLAP_SECONDS = 0.25
 # desktop with a stamp-sized webcam in it, which is worse than GENERAL.
 MIN_FACE_WIDTH = 0.05
 
+# The content shown above the speaker is what lies beside them: this much of
+# the frame width at least (else there is nothing to stack and the scene is
+# left to the face classifier), cut this far from their body.
+MIN_CONTENT_SIDE = 0.3
+PERSON_GAP = 0.02
 
-def content_bands(orig_w, orig_h, out_w, out_h):
-    """(content_height, speaker_height) for the stacked screencast frame.
+# The content band never takes more than this share of the output height, so
+# the speaker below keeps a usable size.
+MAX_CONTENT_BAND = 0.55
 
-    The content keeps its full width, which is the entire point of this layout,
-    so its height follows from the source aspect: a 16:9 source gives 608px of a
-    1920px frame. The speaker takes the rest.
-    """
-    content_h = int(round(out_w * orig_h / float(orig_w)))
-    content_h -= content_h % 2
-    content_h = max(2, min(content_h, out_h - 2))
-    speaker_h = out_h - content_h
-    return content_h, speaker_h
+# A person this tall (fraction of the frame height) in a "screen" shot is
+# standing in a filmed room, not laid over a screen (_filmed_person).
+# main.detect_person_yolo keeps the top 40% of the YOLO box (head and chest).
+FILMED_PERSON_HEIGHT = 0.6
+PERSON_BOX_SHARE = 0.4
+
+# A face this many face widths wide stands in for the body when YOLO finds no
+# person (head and shoulders).
+BODY_FACE_WIDTHS = 3.0
 
 
 def speaker_crop(orig_w, orig_h, out_w, speaker_h, face_centre):
@@ -98,19 +104,55 @@ def speaker_crop(orig_w, orig_h, out_w, speaker_h, face_centre):
     return crop_w, crop_h, x - (x % 2), y - (y % 2)
 
 
-def screencast_filtergraph(orig_w, orig_h, out_w, out_h, face_centre):
-    """Full-width content above, face-framed speaker below."""
-    content_h, speaker_h = content_bands(orig_w, orig_h, out_w, out_h)
+def content_side(frame_w, person_left, person_right):
+    """(x, w) of the columns beside the presenter, or None when there are none.
+
+    The content is on the side away from the person, from the frame edge up to
+    PERSON_GAP short of their body. Until 17-oct-2026 the top band was the
+    whole frame, so the presenter showed twice, once small with the chart and
+    once enlarged below; on a person in front of a whiteboard that is all the
+    layout produced.
+    """
+    gap = frame_w * PERSON_GAP
+    centre = (person_left + person_right) / 2.0
+    if centre >= frame_w / 2.0:
+        x, w = 0, int(person_left - gap)
+    else:
+        x = int(person_right + gap)
+        w = frame_w - x
+    if w < frame_w * MIN_CONTENT_SIDE:
+        return None
+    x += x % 2
+    w -= w % 2
+    return x, w
+
+
+def screencast_filtergraph(orig_w, orig_h, out_w, out_h, face_centre, content):
+    """The content columns above, the face-framed speaker below.
+
+    ``content`` is content_side()'s (x, w). It is fitted whole into the top
+    band (never cropped further) over a blurred backdrop; the speaker takes
+    the rest of the height.
+    """
+    from ffmpeg_utils import blurred_backdrop
+
+    cx_, cw_ = content
+    max_h = int(out_h * MAX_CONTENT_BAND)
+    scale = min(out_w / float(cw_), max_h / float(orig_h))
+    sw = min(out_w, int(round(cw_ * scale)))
+    sh = min(max_h, int(round(orig_h * scale)))
+    sw -= sw % 2
+    sh -= sh % 2
+    speaker_h = out_h - sh
     cw, ch, cx, cy = speaker_crop(orig_w, orig_h, out_w, speaker_h, face_centre)
 
     return (
-        f"[0:v]split=2[ca][sa];"
-        # The content band is the WHOLE frame scaled down. Nothing is cropped
-        # off the sides, which is the one thing this layout exists to guarantee.
-        f"[ca]scale={out_w}:{content_h}[content];"
+        f"[0:v]split=3[bga][ca][sa];"
+        f"[bga]{blurred_backdrop(out_w, out_h, 14)}[bg];"
+        f"[ca]crop=w={cw_}:h={orig_h}:x={cx_}:y=0,scale={sw}:{sh}[content];"
         f"[sa]crop=w={cw}:h={ch}:x={cx}:y={cy},scale={out_w}:{speaker_h}[speaker];"
-        f"[content][speaker]vstack=inputs=2,"
-        f"pad={out_w}:{out_h}:0:0,setsar=1[v]"
+        f"[bg][content]overlay=x={(out_w - sw) // 2}:y=0[top];"
+        f"[top][speaker]overlay=x=0:y={sh},setsar=1[v]"
     )
 
 
@@ -433,14 +475,43 @@ def focus_filtergraph(orig_w, orig_h, out_w, out_h, crop):
     )
 
 
+def _filmed_person(cap, m, s_f, last_f, samples=3):
+    """True when most samples show a person standing in the shot at full size.
+
+    A presenter laid over a screen recording is small: 22-40% of the frame
+    height across the corpus's webcam clips, keyed full-body cut-outs
+    included. A person filmed in a room in front of a whiteboard fills most
+    of the height.
+    """
+    import cv2
+    import numpy as np
+
+    frame_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0
+    if not frame_h:
+        return False
+    hits = 0
+    for f_idx in np.linspace(s_f, last_f, samples):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(f_idx)))
+        ok, frame = cap.read()
+        if not ok:
+            continue
+        person = m.detect_person_yolo(frame)
+        # detect_person_yolo returns the top PERSON_BOX_SHARE of the body.
+        if person and person[3] / PERSON_BOX_SHARE >= FILMED_PERSON_HEIGHT * frame_h:
+            hits += 1
+    return hits * 2 > samples
+
+
 def detect_screencast_scenes(video_path, scenes, strategies, ranges, samples=6):
     """Route scenes that show wide on-screen content.
 
-    Returns ``{scene_index: ('SCREENCAST', centre) | ('WIDE', focus)}``:
+    Returns ``{scene_index: ('SCREENCAST', (centre, content)) | ('WIDE', focus)}``:
 
       - SCREENCAST stacks the content over the presenter, for content that
         leaves room beside itself (width below STACK_MAX_WIDTH_FRACTION) and
-        where a presenter is actually found.
+        where a presenter is actually found. ``content`` is the (x, w) of the
+        columns beside them (content_side); a scene whose presenter leaves no
+        such room is not returned at all.
       - WIDE shows the screen without GENERAL's side crop, for content that
         fills the frame or has no presenter to stack. ``focus`` is the reading
         area (left, right) when the shot check found one, else None.
@@ -468,37 +539,58 @@ def detect_screencast_scenes(video_path, scenes, strategies, ranges, samples=6):
             if not width:
                 continue
 
-            # Content that fills the frame has the presenter on top of it, so
-            # there is nothing to stack — just stop cropping the sides.
-            if width > STACK_MAX_WIDTH_FRACTION:
-                found[i] = ('WIDE', focus)
-                continue
             last_f = e_f - 1
             if total_frames:
                 last_f = min(last_f, total_frames - 1)
             if last_f < s_f:
                 continue
 
-            centres = []
+            # A whiteboard or TV in a filmed room is not a screen layout: the
+            # shot check called a presenter standing at his chart "beside" in
+            # two runs and "screen" in another (17-oct-2026), whatever the
+            # prompt says, and stacking showed him twice while WIDE shrank
+            # him into a strip. The face classifier frames that shot best.
+            # An edited split screen with a full-size presenter goes the same
+            # way and loses its slide, which is the lesser harm.
+            if _filmed_person(cap, m, s_f, last_f):
+                continue
+
+            # Content that fills the frame has the presenter on top of it, so
+            # there is nothing to stack — just stop cropping the sides.
+            if width > STACK_MAX_WIDTH_FRACTION:
+                found[i] = ('WIDE', focus)
+                continue
+
+            centres, extents = [], []
             for f_idx in np.linspace(s_f, last_f, samples):
                 cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(f_idx)))
                 ok, frame = cap.read()
                 if not ok:
                     continue
-                centre = _face_centre(detect_faces_full_res(frame), frame_w)
-                if centre is None:
+                faces = detect_faces_full_res(frame)
+                centre = _face_centre(faces, frame_w)
+                # The body's horizontal extent, so the content band can leave
+                # the person out: YOLO's box when it finds one, else head and
+                # shoulders around the face.
+                person = m.detect_person_yolo(frame)
+                if centre is None and person:
                     # A presenter keyed into the corner of a screen recording is
                     # often too small for BlazeFace even at full resolution
                     # (measured: zero detections across an Excel walkthrough
                     # where the person is plainly visible). YOLO finds the body
                     # in the same frames, and a body centre frames the speaker
                     # just as well for this layout.
-                    person = m.detect_person_yolo(frame)
-                    if person:
-                        centre = (person[0] + person[2] / 2.0,
-                                  person[1] + person[3] / 2.0)
-                if centre:
-                    centres.append(centre)
+                    centre = (person[0] + person[2] / 2.0,
+                              person[1] + person[3] / 2.0)
+                if not centre:
+                    continue
+                centres.append(centre)
+                if person:
+                    extents.append((person[0], person[0] + person[2]))
+                else:
+                    face_w = max(c['box'][2] for c in faces)
+                    half = face_w * BODY_FACE_WIDTHS / 2.0
+                    extents.append((centre[0] - half, centre[0] + half))
 
             # Half the samples: a webcam inset is static and easy to find, so a
             # weaker signal than this means there is no presenter to stack, and
@@ -507,9 +599,16 @@ def detect_screencast_scenes(video_path, scenes, strategies, ranges, samples=6):
                 found[i] = ('WIDE', focus)
                 continue
 
+            content = content_side(
+                frame_w, float(np.median([e[0] for e in extents])),
+                float(np.median([e[1] for e in extents])))
+            if content is None:
+                # The person takes the frame: nothing beside them to stack.
+                # The face classifier's verdict stands.
+                continue
             found[i] = ('SCREENCAST',
-                        (float(np.median([c[0] for c in centres])),
-                         float(np.median([c[1] for c in centres]))))
+                        ((float(np.median([c[0] for c in centres])),
+                          float(np.median([c[1] for c in centres]))), content))
     finally:
         cap.release()
 

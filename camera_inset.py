@@ -60,6 +60,16 @@ MAX_INSET_HEIGHT = 0.38
 # moved 3-11px across samples, a presenter 316px.
 MAX_CENTRE_SPREAD = 0.05
 
+# Room kept above the detection, as a fraction of its height (see inset_box).
+FACE_HEADROOM = 0.35
+BODY_HEADROOM = 0.10
+
+# A webcam window frames head and shoulders: the face is about a third of its
+# width. Used for overlays that float mid-screen, where inset_box's corner
+# anchoring does not apply and pushed the crop up onto the ceiling, and to grow
+# a face detection to the inset in a corner.
+OVERLAY_FACE_WIDTHS = 3.0
+
 
 def nearest_corner(box, frame_w, frame_h):
     """Which corner the subject sits in: (horizontal, vertical) as strings.
@@ -98,25 +108,8 @@ def is_cornered(box, frame_w, frame_h, margin=CORNER_MARGIN):
 INSET_ASPECT = 16 / 9.0
 
 
-def inset_box(box, frame_w, frame_h, padding=None):
-    """Estimated inset rectangle (x, y, w, h) around a detected subject.
-
-    Grown from the corner the subject is anchored to, so the box hugs the same
-    edges the inset does instead of floating around the face.
-
-    The height comes from assuming a 16:9 inset rather than from scaling the
-    detection, because the detection is often a torso: YOLO returned a 246x86
-    box for a webcam whose real rectangle was about 325x180, and padding that
-    shape upwards still cut the head off. Deriving the height from the width
-    and pinning the result to the corner reaches the top of the inset instead.
-    """
-    padding = INSET_PADDING if padding is None else padding
-    x, y, w, h = box
-    horizontal, vertical = nearest_corner(box, frame_w, frame_h)
-
-    new_w = min(frame_w, w * padding)
-    new_h = min(frame_h, max(h * padding, new_w / INSET_ASPECT))
-
+def _place(x, y, w, h, new_w, new_h, frame_w, frame_h, horizontal, vertical):
+    """Top-left corner of a new_w x new_h box grown around the detection."""
     # Anchor: keep the edge the subject is already near, grow the other way.
     if horizontal == "left":
         new_x = max(0, min(x - (new_w - w) / 2.0, frame_w - new_w))
@@ -141,6 +134,53 @@ def inset_box(box, frame_w, frame_h, padding=None):
         new_y = frame_h - new_h
         if (y + h) < frame_h * (1 - CORNER_MARGIN):
             new_y = max(0, min(y - grow * 0.6, frame_h - new_h))
+    return new_x, new_y
+
+
+def inset_box(box, frame_w, frame_h, padding=None, face=False):
+    """Estimated inset rectangle (x, y, w, h) around a detected subject.
+
+    Grown from the corner the subject is anchored to, so the box hugs the same
+    edges the inset does instead of floating around the face.
+
+    The height comes from assuming a 16:9 inset rather than from scaling the
+    detection, because the detection is often a torso: YOLO returned a 246x86
+    box for a webcam whose real rectangle was about 325x180, and padding that
+    shape upwards still cut the head off. Deriving the height from the width
+    and pinning the result to the corner reaches the top of the inset instead.
+
+    ``face`` says the detection is a face box, not YOLO's upper body. A face is
+    a third of a webcam's width (OVERLAY_FACE_WIDTHS), not 1/1.45 of it: grown
+    by the body padding, a 128px face on a 720p Excel walkthrough gave a
+    181px box pinned to the bottom edge that started 41px below the top of
+    the face, and the enlarged band showed a forehead-less face (17-oct-2026).
+    """
+    if padding is None:
+        padding = OVERLAY_FACE_WIDTHS if face else INSET_PADDING
+    x, y, w, h = box
+    horizontal, vertical = nearest_corner(box, frame_w, frame_h)
+
+    new_w = min(frame_w, w * padding)
+    # A face box is square, so tripling its height too would make a portrait
+    # crop; the 16:9 assumption alone sets the height.
+    new_h = new_w / INSET_ASPECT if face else max(h * padding, new_w / INSET_ASPECT)
+    new_h = min(frame_h, new_h)
+    # Never start below the head. A face box stops at the brows, so the hair
+    # needs about a third of its height on top; YOLO's box already starts at
+    # the top of the head.
+    top_limit = max(0.0, y - h * (FACE_HEADROOM if face else BODY_HEADROOM))
+
+    new_x, new_y = _place(x, y, w, h, new_w, new_h, frame_w, frame_h,
+                          horizontal, vertical)
+    if new_y > top_limit:
+        if new_y + new_h >= frame_h - 1:
+            # Pinned to the bottom edge: grow upwards (and keep 16:9) rather
+            # than slide off the edge the inset sits on.
+            new_h = frame_h - top_limit
+            new_w = min(frame_w, max(new_w, new_h * INSET_ASPECT))
+            new_x, _ = _place(x, y, w, h, new_w, new_h, frame_w, frame_h,
+                              horizontal, vertical)
+        new_y = top_limit
 
     return (int(round(new_x)), int(round(new_y)),
             int(round(new_w)), int(round(new_h)))
@@ -192,7 +232,7 @@ def detect(video_path, samples=10):
                 continue
             if not is_cornered(box, frame_w, frame_h):
                 continue
-            boxes.append(inset_box(box, frame_w, frame_h))
+            boxes.append(inset_box(box, frame_w, frame_h, face=bool(faces)))
     finally:
         cap.release()
 
@@ -231,12 +271,6 @@ def stable_box(boxes, frame_w, frame_h, min_agree=3):
     if not usable(median, frame_h):
         return None
     return median
-
-
-# A webcam window frames head and shoulders: the face is about a third of its
-# width. Used for overlays that float mid-screen, where inset_box's corner
-# anchoring does not apply and pushed the crop up onto the ceiling.
-OVERLAY_FACE_WIDTHS = 3.0
 
 
 def overlay_box(box, frame_w, frame_h, widen=OVERLAY_FACE_WIDTHS):
