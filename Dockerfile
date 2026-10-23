@@ -49,13 +49,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libxrender1 \
-    nodejs \
-    npm \
     git \
     fontconfig \
     fonts-liberation \
     fonts-noto-core \
     fonts-noto-color-emoji \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js 22 from NodeSource: Debian's nodejs package is Node 20, which no
+# longer gets security fixes. The bgutil token provider below runs on it.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Deno JS runtime — required by yt-dlp for some extractor challenges.
