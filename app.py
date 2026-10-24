@@ -21,7 +21,7 @@ import socket
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from typing import Any, Dict, Optional, List
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -3668,7 +3668,10 @@ async def download_all_clips(job_id: str, request: Request):
     if not files:
         raise HTTPException(status_code=404, detail="No clip files found for this job")
 
-    zip_path = os.path.join(output_dir, f"clips_{int(time.time())}.zip")
+    # One file per request: two downloads of the same job in the same second
+    # used to share a timestamped name, so the second truncated the ZIP the
+    # first was still streaming and the first cleanup deleted it under the second.
+    zip_path = os.path.join(output_dir, f"clips_{uuid.uuid4().hex}.zip")
 
     def build_zip():
         # Videos are already compressed; store instead of deflate for speed.
@@ -3676,14 +3679,22 @@ async def download_all_clips(job_id: str, request: Request):
             for i, path in files:
                 zf.write(path, arcname=f"clip_{i + 1:02d}_{os.path.basename(path)}")
 
+    def remove_zip():
+        with suppress(FileNotFoundError):
+            os.remove(zip_path)
+
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, build_zip)
+    try:
+        await loop.run_in_executor(None, build_zip)
+    except BaseException:
+        remove_zip()
+        raise
 
     return FileResponse(
         zip_path,
         media_type="application/zip",
         filename=f"openshorts_clips_{job_id[:8]}.zip",
-        background=BackgroundTask(os.remove, zip_path),
+        background=BackgroundTask(remove_zip),
     )
 
 
