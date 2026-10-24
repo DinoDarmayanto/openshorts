@@ -72,6 +72,17 @@ Speed at equal quality:
   pressure the API and the editor endpoints, which run in the API process, go
   first. Containers compete by their CPU weight, not by nice, so this only
   orders work inside the instance.
+- **NVENC encode slots** (`JOB_NVENC_SLOTS`, default 4, `app._job_encode_env`
+  → `bin/ffmpeg`): at most that many job ffmpegs encode with NVENC at once,
+  host-wide (flock files `output/.nvenc-N.lock`, shared by both containers of
+  a deploy). A few encodes already keep the card's NVENC engines busy; with
+  5 jobs × `CLIP_WORKERS` uncapped, dozens of sessions split the same engines
+  and starved any other encoder on the card without finishing jobs sooner.
+  Exempt: the nvenc probe (`NVENC_SLOTS=0` in its env), pipe-fed encoders,
+  and the API process (editor renders). A queued encode runs anyway after
+  `NVENC_SLOT_WAIT` (600 s). 0 turns it off.
+- **QUALITY on p4** (was p5, oct-2026): same hq tune and AQs, same file size
+  and SSIM within 0.001 on a real clip, cheaper per frame on the engine.
 - **`CLIP_WORKERS=6`** by default.
 - **Decode on the card, keep the CPU's pixels** (`gpu_decode`): the scene
   pass, the sampled frames of the classifiers (`frame_sampler.read_at_path`),

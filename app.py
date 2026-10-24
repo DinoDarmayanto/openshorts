@@ -2637,11 +2637,26 @@ def _lower_priority():
         os.nice(n)
 
 
+def _job_encode_env(env):
+    """Job env plus the NVENC encode cap that bin/ffmpeg enforces.
+
+    JOB_NVENC_SLOTS (default 4) job encodes at once on the card, host-wide:
+    the lock files live on the shared output/ volume, so both containers of a
+    deploy handover count against the same slots. Only job processes get it;
+    editor renders in this process stay uncapped, like JOB_NICE. 0 turns it
+    off."""
+    env = dict(env)
+    slots = os.environ.get("JOB_NVENC_SLOTS", "4").strip()
+    env["NVENC_SLOTS"] = slots if slots.isdigit() else "4"
+    env["NVENC_LOCK_DIR"] = os.path.abspath(OUTPUT_DIR)
+    return env
+
+
 async def run_job(job_id, job_data):
     """Executes the subprocess for a specific job."""
 
     cmd = job_data['cmd']
-    env = job_data['env']
+    env = _job_encode_env(job_data['env'])
     output_dir = job_data['output_dir']
     
     jobs[job_id]['status'] = 'processing'

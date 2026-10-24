@@ -32,12 +32,14 @@ _X264_ARGS = {
 
 # NVENC -cq is not 1:1 with x264 CRF: benchmarked on the prod GPU (RTX 4000
 # Ada), cq ≈ crf + 7 lands in the same file-size ballpark, with vbr + AQ for
-# quality. Presets p1-p7: p5 ≈ "medium", p4 ≈ "fast".
+# quality. Presets p1-p7: p5 ≈ "medium", p4 ≈ "fast". QUALITY ran p5 until
+# oct-2026; p4 keeps its hq tune and both AQs and costs the engine less per
+# frame, which on a shared card matters more than p5's small gain.
 # -pix_fmt yuv420p is REQUIRED: with RGB input (the bgr24 rawvideo pipe from
 # OpenCV) nvenc otherwise emits H.264 in gbrp/GBR colorspace, which ffmpeg
 # reads fine but web players render as a magenta/green mess.
 _NVENC_ARGS = {
-    QUALITY: ["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq",
+    QUALITY: ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq",
               "-rc", "vbr", "-cq", "25", "-b:v", "0",
               "-spatial-aq", "1", "-temporal-aq", "1", "-pix_fmt", "yuv420p"],
     QUALITY_FAST: ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq",
@@ -156,15 +158,19 @@ def _probe_nvenc():
 
     NVENC rejects frames smaller than ~145px, so the probe uses 256x256.
     Any failure (no ffmpeg binary, no GPU, no driver libs) means False.
+    Never waits for an encode slot (bin/ffmpeg): queued behind busy encodes it
+    would hit the timeout and turn the whole job to libx264.
     """
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
         "-c:v", "h264_nvenc", "-f", "null", "-",
     ]
+    env = {**os.environ, "NVENC_SLOTS": "0"}
     try:
         result = subprocess.run(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+            env=env,
         )
         return result.returncode == 0
     except Exception:
