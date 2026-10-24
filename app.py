@@ -294,6 +294,23 @@ def _maybe_send_quota_email(user):
     asyncio.create_task(send_out_of_minutes_email(user.email, upgrade_url, user.id))
 
 
+# Free editor actions (reserve_managed_action with 0 minutes): same in-memory
+# window as the probes, sized well above real use (cloud.config).
+_editor_action_times: dict = {}  # owner id -> [monotonic timestamps]
+
+
+def _check_editor_rate(owner_id):
+    if not BILLING_ENABLED or not owner_id:
+        return
+    now = time.monotonic()
+    times = _editor_action_times.setdefault(str(owner_id), [])
+    times[:] = [t for t in times if now - t < 3600]
+    if len(times) >= _cloud_config.EDITOR_ACTIONS_PER_HOUR:
+        raise HTTPException(status_code=429,
+                            detail="Too many edits this hour. Please wait a few minutes.")
+    times.append(now)
+
+
 def _check_probe_rate(user_id):
     now = time.monotonic()
     times = _probe_times.setdefault(str(user_id), [])
@@ -365,7 +382,112 @@ def free_overflow(plan, minutes_required, minutes_remaining, max_minutes, proces
     return None, remaining
 
 
-async def reserve_process_minutes(request, url, input_path, job_id, max_minutes=None):
+def plan_source_range(probed_minutes, source_range):
+    """Validate the dashboard's "clip only this part" range against the source.
+
+    ``source_range`` is ``(start_s, end_s)`` (either may be None for "from the
+    start" / "to the end"). Returns ``{"start_seconds", "end_seconds"}``, or
+    None when no range was asked or it covers the whole video (then the job is
+    an ordinary whole-video one). Raises 400 for a range shorter than
+    ``MIN_RANGE_SECONDS`` or one that starts past the end.
+    """
+    if not source_range:
+        return None
+    start_raw, end_raw = source_range
+    duration = max(0.0, float(probed_minutes) * 60.0)
+    try:
+        start = float(start_raw) if start_raw not in (None, "") else 0.0
+        end = float(end_raw) if end_raw not in (None, "") else duration
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="source_start / source_end must be seconds.")
+    start = max(0.0, start)
+    end = min(duration, end) if duration else end
+    if start <= 1.0 and (not duration or end >= duration - 1.0):
+        return None
+    if end - start < MIN_RANGE_SECONDS:
+        raise HTTPException(status_code=400, detail=(
+            f"Pick at least {MIN_RANGE_SECONDS} seconds of the video to clip."))
+    return {"start_seconds": round(start, 3), "end_seconds": round(end, 3)}
+
+
+def _apply_source_cut(env, partial):
+    """Put a partial job's cut in the main.py env (MAX_SOURCE_MINUTES, and
+    SOURCE_START_SECONDS for a chosen range), or clear it.
+
+    A chosen range is cut to its exact length, not the rounded-down minutes it
+    was billed: the user paid for "from 2:10 to 7:40", not for 5 minutes.
+    """
+    env.pop("SOURCE_START_SECONDS", None)
+    if not partial or not partial.get("processed_minutes"):
+        env.pop("MAX_SOURCE_MINUTES", None)
+        return
+    if partial.get("start_seconds") is not None and partial.get("end_seconds") is not None:
+        start, end = float(partial["start_seconds"]), float(partial["end_seconds"])
+        env["MAX_SOURCE_MINUTES"] = f"{(end - start) / 60.0:.4f}"
+        if start > 0:
+            env["SOURCE_START_SECONDS"] = f"{start:.3f}"
+    else:
+        env["MAX_SOURCE_MINUTES"] = str(partial["processed_minutes"])
+
+
+def _parse_source_range(start, end):
+    """``(start, end)`` from the request fields, or None when neither was sent."""
+    if start in (None, "") and end in (None, ""):
+        return None
+    return (start, end)
+
+
+# A stretch shorter than this cannot hold a few 15-60 s clips.
+MIN_RANGE_SECONDS = 60
+
+# URL probes made for the dashboard's cost line, reused by /api/process when
+# the user submits the same link: (owner, url) -> (monotonic, minutes).
+_probe_cache: dict = {}
+_PROBE_CACHE_TTL = 15 * 60
+
+
+def _cached_probe(owner_id, url):
+    hit = _probe_cache.get((str(owner_id), url))
+    if hit and time.monotonic() - hit[0] < _PROBE_CACHE_TTL:
+        return hit[1]
+    return None
+
+
+def _store_probe(owner_id, url, minutes):
+    now = time.monotonic()
+    for k in [k for k, v in _probe_cache.items() if now - v[0] >= _PROBE_CACHE_TTL]:
+        _probe_cache.pop(k, None)
+    _probe_cache[(str(owner_id), url)] = (now, float(minutes))
+
+
+def estimate_outcome(plan, source_minutes, remaining, processed_before):
+    """What submitting a source of ``source_minutes`` would do, for the cost line.
+
+    Mirrors reserve_process_minutes without reserving anything: ``outcome`` is
+    ``whole`` (the balance covers it), ``first_video_free`` (a free account's
+    first video, clipped whole past the balance), ``first_part`` (clipped to
+    the first ``processed_minutes``) or ``needs_more`` (the quota wall).
+    """
+    cost = _cloud_config.billable_minutes(source_minutes) if _cloud_config else max(
+        1, int(math.floor(float(source_minutes))))
+    remaining = max(0.0, float(remaining or 0))
+    out = {"source_minutes": round(float(source_minutes), 2), "cost_minutes": cost,
+           "remaining": round(remaining, 1), "plan": plan}
+    if cost <= remaining:
+        return {**out, "outcome": "whole"}
+    grant, max_minutes = free_overflow(plan, cost, remaining, None, processed_before)
+    if grant is not None:
+        return {**out, "outcome": "first_video_free", "cost_minutes": grant}
+    if max_minutes is not None:
+        reserve, partial = plan_partial_minutes(cost, remaining, max_minutes)
+        if partial:
+            return {**out, "outcome": "first_part", "cost_minutes": reserve,
+                    "processed_minutes": partial["processed_minutes"]}
+    return {**out, "outcome": "needs_more", "partial_minutes": partial_offer(cost, remaining)}
+
+
+async def reserve_process_minutes(request, url, input_path, job_id, max_minutes=None,
+                                  source_range=None):
     """Meter a managed /api/process request.
 
     Returns (user_id, priority, reservation_id, plan, partial).
@@ -373,6 +495,9 @@ async def reserve_process_minutes(request, url, input_path, job_id, max_minutes=
     ``partial`` is None unless the caller asked (``max_minutes``) to clip only
     the first part of a source its balance cannot cover whole; then it is the
     ``plan_partial_minutes`` dict and only that many minutes are reserved.
+    ``source_range`` (``(start_s, end_s)`` from the dashboard's range picker)
+    clips only that stretch: it is billed alone and comes back as a partial
+    with ``start_seconds`` and ``chosen``.
 
     BYOK / self-host requests don't consume minutes (priority 2, no reservation).
     For a managed (entitled, no BYOK header) request this probes the input
@@ -412,10 +537,14 @@ async def reserve_process_minutes(request, url, input_path, job_id, max_minutes=
             "quota_exceeded", "The user is out of OpenShorts processing minutes for this period.",
             minutes_required=1, minutes_remaining=balance["remaining"], partial_minutes=0)
 
+    # The dashboard's cost line probed this URL a moment ago (/api/process/
+    # estimate): reuse it rather than fetching the same metadata twice.
+    cached = _cached_probe(user.id, url) if url else None
     # Probe rate limit: probing costs a (cheap) proxied metadata call. The
     # 20-minute monthly quota is the real bound on free usage; there is no daily
     # job cap.
-    _check_probe_rate(user.id)
+    if cached is None:
+        _check_probe_rate(user.id)
 
     # Probe input duration (blocking → run in a thread). When today's paid
     # traffic is over budget, the probe (and below, the job itself) runs
@@ -428,7 +557,9 @@ async def reserve_process_minutes(request, url, input_path, job_id, max_minutes=
         pass
     loop = asyncio.get_event_loop()
     try:
-        if url:
+        if cached is not None:
+            minutes = cached
+        elif url:
             minutes = await loop.run_in_executor(
                 None, functools.partial(_metering.probe_url_minutes, url,
                                         allow_paid=paid_allowed))
@@ -450,10 +581,35 @@ async def reserve_process_minutes(request, url, input_path, job_id, max_minutes=
             await _pl.drain_probe_events()
         except Exception:
             pass
-    minutes = max(1, math.ceil(minutes))
+    probed = float(minutes)
+    # Billed in whole minutes rounded DOWN (a 4.6-min video costs 4); the
+    # download's safety cap below still covers the whole file, rounded up.
+    minutes = _cloud_config.billable_minutes(probed)
+    whole_cap = max(1, math.ceil(probed))
     # The probe already learned whether this video is bot-checked on every
     # static IP; the download skips those attempts then (DOWNLOAD_SKIP_STATICS).
     request.state.skip_statics = bool(url) and _metering.pop_statics_bot_checked(url)
+
+    # A stretch picked in the dashboard: only that part is billed and cut.
+    chosen = plan_source_range(probed, source_range)
+    if chosen is not None:
+        chosen_minutes = _cloud_config.billable_minutes(
+            (chosen["end_seconds"] - chosen["start_seconds"]) / 60.0)
+        try:
+            reservation_id = await _metering.reserve_minutes(user.id, chosen_minutes, job_id)
+        except _metering.QuotaExceeded as e:
+            _maybe_send_quota_email(user)
+            raise payment_required(
+                "quota_exceeded",
+                f"This part of the video needs {e.required:g} minutes and the user has "
+                f"{float(e.remaining):.1f} left.",
+                minutes_required=e.required, minutes_remaining=e.remaining, partial_minutes=0)
+        request.state.reserved_minutes = chosen_minutes
+        request.state.first_video = False
+        partial = {"processed_minutes": chosen_minutes, "total_minutes": minutes,
+                   "start_seconds": chosen["start_seconds"],
+                   "end_seconds": chosen["end_seconds"], "chosen": True}
+        return user.id, priority, reservation_id, user.plan, partial
 
     # Free account past its balance: the first video (up to
     # FIRST_VIDEO_MAX_MINUTES) is clipped whole for the balance; any other is
@@ -481,9 +637,10 @@ async def reserve_process_minutes(request, url, input_path, job_id, max_minutes=
     try:
         reservation_id = await _metering.reserve_minutes(user.id, reserve, job_id)
         # Read by process_endpoint for the download's safety cut
-        # (SOURCE_CAP_MINUTES); kept off the return tuple on purpose. A granted
-        # first video is processed whole, so its cap is the probed length.
-        request.state.reserved_minutes = minutes if grant is not None else reserve
+        # (SOURCE_CAP_MINUTES); kept off the return tuple on purpose. A video
+        # processed whole (granted first video included) is capped at its
+        # probed length rounded up, not at the rounded-down minutes it costs.
+        request.state.reserved_minutes = whole_cap if (grant is not None or partial is None) else reserve
         request.state.first_video = grant is not None
         if grant is not None:
             try:
@@ -510,9 +667,11 @@ async def reserve_managed_action(request, minutes, job_id, job_type):
     if not BILLING_ENABLED:
         return None
     if minutes <= 0:
-        # Free action (e.g. burning captions). Skip the ledger entirely rather
-        # than writing a 0-minute row on every call — the endpoint's own
-        # entitlement gate is what bounds it.
+        # Free action (captions, and every editor action on an existing clip:
+        # EDITOR_ACTION_MINUTES). Skip the ledger entirely rather than writing
+        # a 0-minute row on every call; the endpoint's own entitlement gate and
+        # the per-user hourly cap below are what bound it.
+        _check_editor_rate(await _owner_id(request))
         return None
     user = await _user_from_request(request)
     if not managed_keys.has_active_entitlement(user):
@@ -1491,10 +1650,7 @@ def _resume_interrupted_jobs() -> set:
         else:
             env.pop("WATERMARK", None)
         partial = m.get("partial")
-        if partial and partial.get("processed_minutes"):
-            env["MAX_SOURCE_MINUTES"] = str(partial["processed_minutes"])
-        else:
-            env.pop("MAX_SOURCE_MINUTES", None)
+        _apply_source_cut(env, partial)
         if m.get("source_cap_minutes"):
             env["SOURCE_CAP_MINUTES"] = str(m["source_cap_minutes"])
         else:
@@ -3089,6 +3245,58 @@ def layout_env(requested):
     return env
 
 
+class EstimateRequest(BaseModel):
+    url: Optional[str] = None
+    seconds: Optional[float] = None  # a local file: the browser read its duration
+
+
+@app.post("/api/process/estimate")
+async def process_estimate(req: EstimateRequest, request: Request):
+    """Cost line for the dashboard: what this source would cost before it runs.
+
+    Probes a URL's duration the same way /api/process does (and caches it so
+    the submit does not probe twice), or takes the duration of a local file the
+    browser already read. Never on the per-GB proxy: a link only that proxy
+    can read gets no estimate (``outcome`` None) and is probed again on submit
+    with every route. Reserves nothing.
+    """
+    if not BILLING_ENABLED:
+        return {"billing": False}
+    user = await _user_from_request(request)
+    if not managed_keys.has_active_entitlement(user):
+        return {"billing": True, "outcome": None}
+    url = (req.url or "").strip()
+    if url:
+        minutes = _cached_probe(user.id, url)
+        if minutes is None:
+            # Its own hourly window: pasting a few links must not use up the
+            # probes the submit itself needs.
+            _check_probe_rate(f"estimate:{user.id}")
+            loop = asyncio.get_event_loop()
+            try:
+                minutes = await loop.run_in_executor(
+                    None, functools.partial(_metering.probe_url_minutes, url, allow_paid=False))
+            except Exception as e:
+                from yt_clients import NotASingleVideo
+                if isinstance(e, NotASingleVideo):
+                    return {"billing": True, "outcome": None, "error": str(e)}
+                return {"billing": True, "outcome": None}
+            _store_probe(user.id, url, minutes)
+    elif req.seconds and req.seconds > 0:
+        minutes = float(req.seconds) / 60.0
+    else:
+        raise HTTPException(status_code=400, detail="Send a url or the file's seconds.")
+    balance = await _metering.get_balance(user.id)
+    processed_before = True
+    if balance.get("plan") == "free":
+        processed_before = await _metering.has_processed_before(user.id)
+        if not processed_before:
+            ip_hash = _metering.ip_fingerprint(request.client.host if request.client else "")
+            processed_before = await _metering.ip_had_first_video(ip_hash)
+    return {"billing": True, **estimate_outcome(
+        balance.get("plan"), minutes, balance["remaining"], processed_before)}
+
+
 @app.post("/api/process")
 async def process_endpoint(
     request: Request,
@@ -3109,6 +3317,8 @@ async def process_endpoint(
     captions: Optional[str] = Form(None),
     upload_id: Optional[str] = Form(None),
     max_minutes: Optional[str] = Form(None),
+    source_start: Optional[str] = Form(None),
+    source_end: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
     if not api_key and not (llm_backend.active() and not BILLING_ENABLED):
@@ -3144,6 +3354,8 @@ async def process_endpoint(
         captions = body.get("captions")
         upload_id = body.get("upload_id")
         max_minutes = body.get("max_minutes")
+        source_start = body.get("source_start")
+        source_end = body.get("source_end")
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
@@ -3373,7 +3585,8 @@ async def process_endpoint(
 
     # Meter + reserve minutes for managed users (no-op for BYOK / self-host).
     user_id, priority, reservation_id, user_plan, partial = await reserve_process_minutes(
-        request, url, input_path, job_id, max_minutes=max_minutes)
+        request, url, input_path, job_id, max_minutes=max_minutes,
+        source_range=_parse_source_range(source_start, source_end))
 
     # Pre-flight quality gate: probe the offered resolution BEFORE starting, so
     # the user can abort (refresh cookies / update yt-dlp) instead of burning
@@ -3411,7 +3624,7 @@ async def process_endpoint(
     if partial:
         # main.py cuts the source down to this many minutes before anything
         # reads it, so the whole pipeline (and the editor) sees a short video.
-        env["MAX_SOURCE_MINUTES"] = str(partial["processed_minutes"])
+        _apply_source_cut(env, partial)
     if user_plan == "free":
         # Free-plan clips carry a burned-in watermark (applied by the main.py
         # subprocess after each clip renders).
@@ -3936,7 +4149,7 @@ async def edit_clip(
 
     # Meter the managed Gemini call so it can't be looped for free. Skip only for
     # genuine BYOK (self-host body key) — in cloud, body_key is always None.
-    edit_minutes = _cloud_config.MANAGED_ANALYSIS_MINUTES if BILLING_ENABLED else 0
+    edit_minutes = _cloud_config.EDITOR_ACTION_MINUTES if BILLING_ENABLED else 0
     reservation_id = None if body_key else await reserve_managed_action(
         request, edit_minutes, req.job_id, "edit")
 
@@ -4288,8 +4501,7 @@ async def get_clip_edl(job_id: str, clip_index: int, request: Request):
             "min_segment_seconds": recut.MIN_SEGMENT_SECONDS,
             "max_total_seconds": recut.MAX_TOTAL_SECONDS,
         },
-        "rerender_minutes": (max(1, math.ceil(total / 60.0))
-                             if BILLING_ENABLED else 0),
+        "rerender_minutes": _cloud_config.EDITOR_ACTION_MINUTES if BILLING_ENABLED else 0,
     }
 
 
@@ -4418,8 +4630,7 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
                     "must stay within the original clip range."))
 
     total = recut.total_duration(segments)
-    rerender_minutes = (max(1, math.ceil(total / 60.0))
-                        if BILLING_ENABLED else 0)
+    rerender_minutes = _cloud_config.EDITOR_ACTION_MINUTES if BILLING_ENABLED else 0
     reservation_id = await reserve_managed_action(
         request, rerender_minutes, req.job_id, "rerender")
 
@@ -4783,8 +4994,7 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
     # A reframe re-renders the full cut from source — same work as a source-path
     # rerender, so it meters the same.
     total = recut.total_duration(segments)
-    rerender_minutes = (max(1, math.ceil(total / 60.0))
-                        if BILLING_ENABLED else 0)
+    rerender_minutes = _cloud_config.EDITOR_ACTION_MINUTES if BILLING_ENABLED else 0
     reservation_id = await reserve_managed_action(
         request, rerender_minutes, req.job_id, "reframe")
 
@@ -4936,7 +5146,7 @@ async def generate_effects_config(
         raise HTTPException(status_code=400, detail="Job result not available")
 
     # Meter the managed Gemini call (no-op for self-host).
-    fx_minutes = _cloud_config.MANAGED_ANALYSIS_MINUTES if BILLING_ENABLED else 0
+    fx_minutes = _cloud_config.EDITOR_ACTION_MINUTES if BILLING_ENABLED else 0
     reservation_id = await reserve_managed_action(request, fx_minutes, req.job_id, "effects")
 
     try:
@@ -5400,7 +5610,7 @@ async def add_hook(req: HookRequest, request: Request):
         font_scale = size_map.get(req.size, 1.0)
 
         # Meter the FFmpeg overlay re-encode (no-op for BYOK / self-host).
-        hook_minutes = _cloud_config.HOOK_MINUTES if BILLING_ENABLED else 0
+        hook_minutes = _cloud_config.EDITOR_ACTION_MINUTES if BILLING_ENABLED else 0
         reservation_id = await reserve_managed_action(
             request, hook_minutes, req.job_id, "hook")
 
@@ -5607,6 +5817,41 @@ def _post_video_blocking(url, headers, data, file_path, filename, timeout):
         return client.post(url, headers=headers, data=data, files=files)
 
 
+# YouTube refuses a title over 100 characters; the Gemini title is not bounded.
+YOUTUBE_TITLE_MAX = 100
+
+
+def youtube_title(title) -> str:
+    """``title`` cut to YouTube's limit, on a word boundary when there is one."""
+    t = " ".join(str(title or "").split())
+    if len(t) <= YOUTUBE_TITLE_MAX:
+        return t
+    cut = t[:YOUTUBE_TITLE_MAX]
+    space = cut.rfind(" ")
+    return (cut[:space] if space >= YOUTUBE_TITLE_MAX // 2 else cut).rstrip(" ,.;:-")
+
+
+# Async uploads started here, so the status proxy below only ever answers the
+# account that started them (managed users share one Upload-Post key).
+# request_id -> owner id; in memory, an unknown id after a restart is "unknown".
+_post_request_owners: dict = {}
+
+
+async def _platforms_needing_reconnect(profile, platforms):
+    """Requested platforms whose Upload-Post login has expired (reauth_required).
+
+    Upload-Post accepts an async upload to such an account and fails it later,
+    out of sight: "it worked once and never again" (cancel survey, 1-oct-2026).
+    Fail-open: any error reading the accounts lets the upload go ahead.
+    """
+    try:
+        from cloud.autopilot import fetch_social_accounts
+        accounts = await fetch_social_accounts(profile)
+    except Exception:
+        return []
+    return [p for p in platforms if (accounts.get(p) or {}).get("reauth_required")]
+
+
 @app.post("/api/social/post")
 async def post_to_socials(req: SocialPostRequest, request: Request):
     await _ensure_job_files(req.job_id, request)
@@ -5624,6 +5869,14 @@ async def post_to_socials(req: SocialPostRequest, request: Request):
     await _assert_job_owner(request, job)
     if 'result' not in job or 'clips' not in job['result']:
         raise HTTPException(status_code=400, detail="Job result not available")
+
+    if BILLING_ENABLED and forced_profile:
+        stale = await _platforms_needing_reconnect(post_user, req.platforms)
+        if stale:
+            names = ", ".join(p.capitalize() if p != "youtube" else "YouTube" for p in stale)
+            raise HTTPException(status_code=409, detail=(
+                f"Reconnect {names} first: its login has expired, so the post would "
+                "fail. Use \"connect socials\" and try again."))
 
     try:
         clip = job['result']['clips'][req.clip_index]
@@ -5674,7 +5927,7 @@ async def post_to_socials(req: SocialPostRequest, request: Request):
 
         if "youtube" in req.platforms:
              yt_title = req.title or clip.get('video_title_for_youtube_short', final_title)
-             data_payload["youtube_title"] = yt_title
+             data_payload["youtube_title"] = youtube_title(yt_title)
              data_payload["youtube_description"] = final_description
              data_payload["privacyStatus"] = "public"
 
@@ -5692,11 +5945,46 @@ async def post_to_socials(req: SocialPostRequest, request: Request):
              print(f"❌ Upload-Post Error: {response.text}")
              raise HTTPException(status_code=response.status_code, detail=f"Vendor API Error: {response.text}")
 
-        return response.json()
+        out = response.json()
+        if isinstance(out, dict) and out.get("request_id"):
+            _post_request_owners[str(out["request_id"])] = await _owner_id(request)
+        return out
 
     except Exception as e:
         print(f"❌ Social Post Exception: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/social/post-status/{request_id}")
+async def social_post_status(request_id: str, request: Request):
+    """Where an async upload started by /api/social/post really ended up.
+
+    A 200 from the upload only means Upload-Post accepted the file; the post
+    itself can still fail per platform, and the dashboard used to say "Posted
+    successfully!" either way.
+    """
+    owner = _post_request_owners.get(request_id)
+    if owner is None:
+        return {"status": "unknown"}
+    if owner != await _owner_id(request):
+        raise HTTPException(status_code=404, detail="Not found")
+    upload_key, _ = await resolve_upload_post(request, None)
+    if not upload_key:
+        return {"status": "unknown"}
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        try:
+            resp = await client.get("https://api.upload-post.com/api/uploadposts/status",
+                                    headers={"Authorization": f"Apikey {upload_key}"},
+                                    params={"request_id": request_id})
+            data = resp.json()
+        except Exception:
+            return {"status": "unknown"}
+    results = [
+        {"platform": r.get("platform"), "success": r.get("success"),
+         "message": r.get("message") or r.get("error")}
+        for r in (data.get("results") or []) if isinstance(r, dict)
+    ] if isinstance(data, dict) else []
+    return {"status": (data or {}).get("status") or "unknown", "results": results}
 
 @app.get("/api/social/user")
 async def get_social_user(request: Request):
@@ -6520,7 +6808,7 @@ async def thumbnail_publish(
                 "platform[]": ["youtube"],
                 "title": title,          # required base field (fallback)
                 "async_upload": "true",
-                "youtube_title": title,
+                "youtube_title": youtube_title(title),
                 "youtube_description": description,
                 "privacyStatus": "public",
             }
@@ -6853,7 +7141,7 @@ async def saasshorts_post_to_socials(req: SaaSPostRequest, request: Request):
             data_payload["instagram_title"] = final_description
             data_payload["media_type"] = "REELS"
         if "youtube" in req.platforms:
-            data_payload["youtube_title"] = final_title
+            data_payload["youtube_title"] = youtube_title(final_title)
             data_payload["youtube_description"] = final_description
             data_payload["privacyStatus"] = "public"
 

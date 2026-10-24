@@ -5,6 +5,7 @@ Everything here is read lazily from environment variables so that importing the
 ``BILLING_ENABLED`` is truthy (see ``cloud.is_enabled``).
 """
 import os
+import math
 from functools import lru_cache
 
 
@@ -140,8 +141,31 @@ def subtitle_minutes_for(filename: str) -> int:
     translated audio, which is real compute, so they keep the charge.
     """
     return SUBTITLE_MINUTES if str(filename).startswith("translated_") else 0
-HOOK_MINUTES = 1
 RENDER_MINUTES = 3
+
+# Editing a clip that already exists is free: AI edit and effects, the hook
+# overlay, recut/rerender and reframe. Metering them cost ~1% of all minutes
+# (prod, 24-sep to 24-oct-2026) and made the editor feel like a meter running,
+# when the minutes a user buys are meant to pay for the video they import.
+# What bounds the compute instead is EDITOR_ACTIONS_PER_HOUR per user (p99 of
+# the same month: 12 such actions in an hour, the busiest user 46).
+EDITOR_ACTION_MINUTES = 0
+EDITOR_ACTIONS_PER_HOUR = 60
+
+
+def billable_minutes(minutes: float) -> int:
+    """Whole minutes charged for ``minutes`` of source: rounded down, at least 1.
+
+    A 4.6-minute video costs 4, not 5, the way the per-minute clippers bill
+    (Opus Clip rounds partial minutes down too). Anything that must cover the
+    whole file (the download's safety cap) uses the duration rounded UP, not
+    this.
+    """
+    try:
+        m = float(minutes)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, int(math.floor(m + 1e-9)))
 
 # The thumbnail-studio upload kicks off a (possibly YouTube) download + a full
 # Whisper transcription in the background — expensive and proxy-bandwidth-heavy.

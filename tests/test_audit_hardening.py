@@ -55,7 +55,7 @@ def calls(monkeypatch):
         order.append("probe")
         return order_probe_result[0]
 
-    async def _reserve(request, url, input_path, job_id, max_minutes=None):
+    async def _reserve(request, url, input_path, job_id, max_minutes=None, **_kw):
         order.append("reserve")
         request.state.reserved_minutes = 12
         return 7, 1, "res-1", "starter", None

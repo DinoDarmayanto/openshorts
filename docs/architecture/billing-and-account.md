@@ -1,5 +1,36 @@
 # Billing flows, lifecycle emails and account erasure
 
+## What a minute pays for (`config.billable_minutes`, `EDITOR_ACTION_MINUTES`)
+
+Minutes pay for the source a user imports: whole minutes **rounded down**, at
+least 1 (a 4.6-min video costs 4). The download's safety cap
+(`SOURCE_CAP_MINUTES`) still covers the whole file, so it uses the probed length
+rounded **up**. Editing a clip that exists is free: AI edit and effects, the
+hook overlay, recut/rerender and reframe reserve `EDITOR_ACTION_MINUTES` (0), and
+`reserve_managed_action` bounds 0-minute actions (captions included) with
+`EDITOR_ACTIONS_PER_HOUR` per user instead (429). Thumbnail image generation,
+thumbnail transcription/analysis and SaaS-shorts analysis keep their fixed cost.
+
+## Cost line and picked stretch (`/api/process/estimate`, `SourceCost.jsx`)
+
+Under the source input the dashboard says what the video will cost before it
+runs. `POST /api/process/estimate` takes `{url}` (probed like the submit, but
+never on the per-GB proxy, in its own hourly probe window, and cached per user
+for 15 min so the submit does not probe again) or `{seconds}` (a local file the
+browser already measured), and answers `estimate_outcome`: `whole`,
+`first_video_free`, `first_part` or `needs_more`, mirroring
+`reserve_process_minutes` without reserving. "Clip only part of it" opens a
+from/to picker; `/api/process` then takes `source_start` / `source_end`
+(seconds). `plan_source_range` validates them (at least `MIN_RANGE_SECONDS`; the
+whole video is an ordinary job), only that stretch is billed (no free overflow,
+no partial offer on its 402), and the job is a partial with `start_seconds`,
+`end_seconds` and `chosen: true`. `_apply_source_cut` sets
+`MAX_SOURCE_MINUTES` to the exact length and `SOURCE_START_SECONDS`; main.py
+downloads up to the stretch's end and `cap_source_duration` cuts from the start,
+leaving a `.range` stamp so a resumed job does not cut the cut file again. The
+"first N minutes" banners stay off for a chosen stretch, and clip times seek the
+source preview shifted by its start.
+
 ## Quota wall offers the first N minutes (`app.partial_offer`)
 
 The wall (`TopUpModal`, context `wall`) opens on a 402 from `/api/process`. The

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Link2, Upload, FileVideo, X, Info, Loader2, ChevronDown } from 'lucide-react';
 import { track } from '../lib/analytics';
 import { getApiUrl } from '../config';
+import SourceCost from './SourceCost';
 
 const SUPPORTED_PLATFORMS = [
     'YouTube', 'Vimeo', 'TikTok', 'X / Twitter', 'Twitch',
@@ -38,6 +39,8 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [fileSeconds, setFileSeconds] = useState(null);
     const fileTooShort = fileSeconds != null && fileSeconds < MIN_SOURCE_SECONDS;
     const [acknowledged, setAcknowledged] = useState(false);
+    // {start, end} in seconds when the user picked a stretch under the cost line.
+    const [range, setRange] = useState(null);
     const [outputFormat, setOutputFormat] = useState('vertical'); // vertical | horizontal | square
     const [showInfo, setShowInfo] = useState(false);
     // Advanced generation controls — empty string means "let the AI decide",
@@ -124,6 +127,8 @@ export default function MediaInput({ onProcess, isProcessing }) {
             autoHook,
             autoHookStyle,
             layout,
+            sourceStart: range ? Math.round(range.start) : null,
+            sourceEnd: range ? Math.round(range.end) : null,
         };
         try {
             localStorage.setItem('os_auto_hook', autoHook ? '1' : '0');
@@ -253,6 +258,14 @@ export default function MediaInput({ onProcess, isProcessing }) {
                         )}
                     </div>
                 )}
+
+                <SourceCost
+                    mode={mode}
+                    url={url}
+                    fileSeconds={fileSeconds}
+                    range={range}
+                    onRangeChange={setRange}
+                />
 
                 {/* Output format selector */}
                 <div className="mt-5" data-tutorial="output-format">

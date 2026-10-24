@@ -2,7 +2,8 @@
 
 ## Main endpoints
 
-- `POST /api/process`: submit a video for processing.
+- `POST /api/process`: submit a video for processing. Optional `source_start` /
+  `source_end` (seconds) clip and bill only that stretch.
 - `GET /api/status/{job_id}`: poll job status and logs.
 - `POST /api/edit`: apply AI video effects.
 - `POST /api/subtitle`: generate and apply subtitles (auto-transcribes dubbed videos).

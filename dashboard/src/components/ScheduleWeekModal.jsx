@@ -154,7 +154,9 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
 
                 if (!res.ok) {
                     const errText = await res.text();
-                    throw new Error(errText);
+                    let detail = errText;
+                    try { detail = JSON.parse(errText).detail || errText; } catch { /* not JSON */ }
+                    throw new Error(detail);
                 }
 
                 results.push({ index: i, success: true });

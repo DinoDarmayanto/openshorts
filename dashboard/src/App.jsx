@@ -322,6 +322,14 @@ function App() {
   const [socialNudgeDismissed, setSocialNudgeDismissed] = useState(() => {
     try { return localStorage.getItem('os_social_nudge_dismissed') === '1'; } catch (_) { return false; }
   });
+  // Autopilot nudge, same results peak, ahead of the social one: the sign-up
+  // survey's "autopilot" goal pays about twice the "clips" one, and 95% of
+  // users never come back a second day; Autopilot is the one feature that
+  // works without them coming back. Gone once clicked or dismissed.
+  const [autopilotNudgeDismissed, setAutopilotNudgeDismissed] = useState(() => {
+    try { return localStorage.getItem('os_autopilot_nudge_dismissed') === '1'; } catch (_) { return false; }
+  });
+  const [autopilotOn, setAutopilotOn] = useState(false);
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState('idle'); // idle, processing, complete, error
@@ -388,7 +396,9 @@ function App() {
   const [syncTrigger, setSyncTrigger] = useState(0);
 
   const handleClipPlay = (startTime) => {
-    setSyncedTime(startTime);
+    // Clip times are relative to the processed stretch; the preview plays the
+    // whole source, so a picked range shifts them by its start.
+    setSyncedTime(startTime + (Number(partialJob?.start_seconds) || 0));
     setIsSyncedPlaying(true);
     setSyncTrigger(prev => prev + 1);
   };
@@ -925,12 +935,14 @@ function App() {
 
   const tutorialLock = tutorialPhase === 'intro' || tutorialPhase === 'coach' || tutorialPhase === 'celebrate';
 
-  // Sign-up survey (cloud/onboarding.py): before the tutorial intro, never on
-  // top of a job that is already running (a parked request resuming, or the
-  // coach phase) or of the celebration.
+  // Sign-up survey (cloud/onboarding.py): before the tutorial intro, never
+  // during the coach phase or the celebration. It may open while a job runs or
+  // once it is done: a link pasted on the landing resumes straight into
+  // processing after sign-in, and gating on 'idle' left ~half of all sign-ups
+  // (the landing-paste flow, 98% of whom never come back) unasked.
   const [surveyDone, setSurveyDone] = useState(false);
   const showSurvey = billingEnabled && !!me?.onboarding_survey_pending && !surveyDone
-    && (tutorialPhase === null || tutorialPhase === 'intro') && status === 'idle';
+    && (tutorialPhase === null || tutorialPhase === 'intro') && status !== 'error';
 
   useEffect(() => {
     if (tutorialLock && activeTab !== 'dashboard') setActiveTab('dashboard');
@@ -992,7 +1004,33 @@ function App() {
   // connected yet. userProfiles being empty (not yet fetched / none created)
   // also counts as "not connected" — that is the 97% case.
   const connectedSocials = ((userProfiles.find((p) => p.username === uploadUserId) || userProfiles[0])?.connected) || [];
-  const showSocialNudge = isManaged && !socialNudgeDismissed && connectedSocials.length === 0 && !tutorialLock;
+  const showAutopilotNudge = billingEnabled && isManaged && !autopilotNudgeDismissed && !autopilotOn && !tutorialLock;
+  const showSocialNudge = isManaged && !socialNudgeDismissed && connectedSocials.length === 0 && !tutorialLock
+    && !showAutopilotNudge;
+
+  // Paid plans may already run Autopilot: ask once, on the first results.
+  const autopilotCheckedRef = useRef(false);
+  useEffect(() => {
+    if (status !== 'complete' || !showAutopilotNudge || plan === 'free' || autopilotCheckedRef.current) return;
+    autopilotCheckedRef.current = true;
+    apiJson('/api/autopilot')
+      .then((d) => { if (d?.settings?.enabled) setAutopilotOn(true); })
+      .catch(() => { /* keep the nudge */ });
+  }, [status, showAutopilotNudge, plan]);
+
+  const dismissAutopilotNudge = (event) => {
+    track(event);
+    setAutopilotNudgeDismissed(true);
+    try { localStorage.setItem('os_autopilot_nudge_dismissed', '1'); } catch (_) { /* ignore */ }
+  };
+
+  const autopilotNudgeSeenRef = useRef(null);
+  useEffect(() => {
+    if (status === 'complete' && (results?.clips?.length > 0) && showAutopilotNudge && autopilotNudgeSeenRef.current !== jobId) {
+      autopilotNudgeSeenRef.current = jobId;
+      track('AutopilotNudgeSeen', { props: { plan: plan || 'free' } });
+    }
+  }, [status, results, showAutopilotNudge, jobId, plan]);
 
   // One Seen event per job, only when the banner actually rendered.
   const socialNudgeSeenRef = useRef(null);
@@ -1076,6 +1114,9 @@ function App() {
         // Set when the user took the quota wall's "clip the first N minutes"
         // offer: the server reserves N minutes and cuts the source to them.
         max_minutes: data.maxMinutes || null,
+        // The stretch picked under the cost line (seconds); absent = whole video.
+        source_start: data.sourceStart ?? null,
+        source_end: data.sourceEnd ?? null,
       };
 
       if (data.type === 'url') {
@@ -1127,7 +1168,7 @@ function App() {
       // The server clipped past the balance on its own (no wall): the first
       // video whole, or the first N minutes of a later one.
       if (resData.first_video) track('FirstVideoGrant');
-      else if (resData.partial && data.maxMinutes == null) {
+      else if (resData.partial && !resData.partial.chosen && data.maxMinutes == null) {
         track('AutoPartial', { props: { processed: resData.partial.processed_minutes, total: resData.partial.total_minutes } });
       }
       if (data.type === 'thumbnail_session') {
@@ -2060,7 +2101,7 @@ function App() {
 
                 {/* Trimmed run: say it while it renders, not only once the
                     clips land, so the shorter result is no surprise. */}
-                {status === 'processing' && partialJob && plan === 'free' && isManaged && (
+                {status === 'processing' && partialJob && !partialJob.chosen && plan === 'free' && isManaged && (
                   <button
                     onClick={() => openUpsell({ source: 'partial_processing', partialJob })}
                     className="mb-4 w-full text-left rounded-card border border-brass/40 bg-brass/5 px-4 py-3 text-sm hover:border-brass transition-colors"
@@ -2206,7 +2247,7 @@ function App() {
                   <div className="mb-2 space-y-2">
                     {/* Partial job: the clips on screen come from the first N
                         minutes only. Say so, and sell the rest of the video. */}
-                    {partialJob && (
+                    {partialJob && !partialJob.chosen && (
                       <button
                         onClick={() => openUpsell({ source: 'partial_banner', partialJob })}
                         className="w-full text-left px-3 py-2.5 rounded-input bg-paper3 border border-brass/40 hover:border-brass text-sm transition-colors"
@@ -2227,7 +2268,7 @@ function App() {
                         <span className="text-brass font-medium">Keep clipping →</span>
                       </button>
                     )}
-                    {plan === 'free' && !partialJob && !firstVideoJob && (
+                    {plan === 'free' && (!partialJob || partialJob.chosen) && !firstVideoJob && (
                       <button
                         onClick={() => openUpsell({ source: 'results_banner' })}
                         className="w-full text-left px-3 py-2.5 rounded-input bg-paper3 border border-brass/40 hover:border-brass text-sm transition-colors"
@@ -2236,6 +2277,40 @@ function App() {
                         <span className="text-muted">Upgrade and these exact clips lose the watermark on the spot, and stay for good.</span>{' '}
                         <span className="text-brass font-medium">Remove the watermark →</span>
                       </button>
+                    )}
+                    {showAutopilotNudge && (
+                      <div className="w-full flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 px-3 py-2.5 rounded-input bg-paper3 border border-rule text-sm">
+                        <div className="flex items-start gap-3 flex-1 min-w-0">
+                          <Rocket size={16} className="text-brass shrink-0 mt-0.5" />
+                          <div className="min-w-0 leading-relaxed">
+                            <span className="text-ink">Want this for every new video, without coming back?</span>{' '}
+                            <span className="text-muted">
+                              Autopilot watches your YouTube channel and clips each new upload on its own
+                              {plan === 'free' ? ', included in every paid plan.' : '.'}
+                            </span>
+                          </div>
+                          <button
+                            onClick={() => dismissAutopilotNudge('AutopilotNudgeDismissed')}
+                            aria-label="dismiss"
+                            className="sm:hidden shrink-0 -m-1 p-1 text-muted hover:text-ink"
+                          >
+                            <X size={16} />
+                          </button>
+                        </div>
+                        <button
+                          onClick={() => { dismissAutopilotNudge('AutopilotNudgeClicked'); setActiveTab('autopilot'); }}
+                          className="btn-quiet shrink-0 text-xs py-1.5 px-3 lowercase w-full sm:w-auto"
+                        >
+                          set up autopilot →
+                        </button>
+                        <button
+                          onClick={() => dismissAutopilotNudge('AutopilotNudgeDismissed')}
+                          aria-label="dismiss"
+                          className="hidden sm:block shrink-0 p-1 text-muted hover:text-ink"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
                     )}
                     {/* Distribution nudge at the same peak: clips on screen,
                         publishing them is one connect away. Hidden once any

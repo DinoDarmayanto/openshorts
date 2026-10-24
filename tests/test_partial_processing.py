@@ -142,7 +142,7 @@ def dirs(tmp_path, monkeypatch):
 def _stub_reservation(monkeypatch, partial):
     seen = {}
 
-    async def _reserve(request, url, input_path, job_id, max_minutes=None):
+    async def _reserve(request, url, input_path, job_id, max_minutes=None, **_kw):
         seen["max_minutes"] = max_minutes
         return 7, 1, "res-1", "free", partial
     monkeypatch.setattr(app_module, "reserve_process_minutes", _reserve)

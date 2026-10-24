@@ -517,7 +517,7 @@ export const PRICE_MODELS = {
   },
   openshorts: {
     name: 'OpenShorts Cloud',
-    unit: 'per source minute',
+    unit: 'per source minute, editing free',
     checked: '2026-10-05',
     plans: [
       { name: 'Free', watermark: true, monthly: { minutes: 20, price: 0 } },

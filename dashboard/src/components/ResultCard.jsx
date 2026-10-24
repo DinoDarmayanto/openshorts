@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Download, Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { apiFetch } from '../lib/api';
+import { track } from '../lib/analytics';
 import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
@@ -13,6 +14,32 @@ import { useAuth } from '../contexts/AuthContext';
 import { renderInBrowser } from '../lib/renderInBrowser';
 
 const QUIET_BTN = 'group flex flex-col items-center justify-center gap-1 py-2.5 sm:py-2 px-1 rounded-input border border-rule hover:bg-paper3 text-[11px] lowercase text-ink2 whitespace-nowrap transition-colors disabled:opacity-45 disabled:cursor-not-allowed';
+
+// Follow an async post (request_id from /api/social/post) for about a minute.
+// Returns {done, failed}: done once every platform finished, failed lists
+// "platform: reason" for the ones that did not. Unknown or slow = neither.
+const POST_TERMINAL = new Set(['completed', 'failed', 'not_found']);
+async function followPost(requestId, tries = 12, everyMs = 5000) {
+    for (let i = 0; i < tries; i++) {
+        await new Promise((r) => setTimeout(r, everyMs));
+        let d;
+        try {
+            const r = await apiFetch(`/api/social/post-status/${encodeURIComponent(requestId)}`);
+            if (!r.ok) continue;
+            d = await r.json();
+        } catch {
+            continue;
+        }
+        if (d.status === 'unknown') return { done: false, failed: [] };
+        if (!POST_TERMINAL.has(d.status)) continue;
+        const failed = (d.results || [])
+            .filter((x) => x.success === false)
+            .map((x) => `${x.platform}${x.message ? `: ${x.message}` : ''}`);
+        if (d.status !== 'completed' && !failed.length) failed.push('every platform');
+        return { done: d.status === 'completed', failed };
+    }
+    return { done: false, failed: [] };
+}
 
 const PLATFORM_OPTIONS = [
     { value: 'tiktok', label: 'tiktok', icon: <Video size={16} /> },
@@ -717,19 +744,34 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
 
             if (!res.ok) {
                 const errText = await res.text();
-                try {
-                    const jsonErr = JSON.parse(errText);
-                    throw new Error(jsonErr.detail || errText);
-                } catch (e) {
-                    throw new Error(errText);
-                }
+                let detail = errText;
+                try { detail = JSON.parse(errText).detail || errText; } catch { /* not JSON */ }
+                throw new Error(detail);
             }
 
-            setPostResult({ success: true, msg: isScheduling ? "Scheduled successfully!" : "Posted successfully!" });
-            setTimeout(() => {
-                setShowModal(false);
-                setPostResult(null);
-            }, 3000);
+            const sent = await res.json().catch(() => ({}));
+            if (isScheduling || !sent?.request_id) {
+                setPostResult({ success: true, msg: isScheduling ? "Scheduled successfully!" : "Sent for publishing." });
+                setTimeout(() => {
+                    setShowModal(false);
+                    setPostResult(null);
+                }, 3000);
+                return;
+            }
+            // A 200 only means Upload-Post took the file: follow the post to
+            // its real end, so a platform that fails says so here.
+            setPostResult({ success: true, msg: "Publishing…" });
+            const outcome = await followPost(sent.request_id);
+            if (outcome.failed.length) {
+                setPostResult({ success: false, msg: `Failed on ${outcome.failed.join('; ')}` });
+                track('SocialPostFailed', { props: { platforms: selectedPlatforms.join(',') } });
+            } else {
+                setPostResult({ success: true, msg: outcome.done ? "Posted successfully!" : "Still publishing: check your accounts in a few minutes." });
+                setTimeout(() => {
+                    setShowModal(false);
+                    setPostResult(null);
+                }, 3000);
+            }
 
         } catch (e) {
             setPostResult({ success: false, msg: `Failed: ${e.message}` });

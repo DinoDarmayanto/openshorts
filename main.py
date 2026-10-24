@@ -743,8 +743,21 @@ def plan_download_attempts(direct_first, statics, paid, have_hd, youtube=True,
     return plan
 
 
-def cap_source_duration(input_video, max_minutes, safety=False):
+def _file_stamp(path):
+    try:
+        st = os.stat(path)
+        return [st.st_size, st.st_mtime_ns]
+    except OSError:
+        return None
+
+
+def cap_source_duration(input_video, max_minutes, safety=False, start_seconds=0.0):
     """Cut ``input_video`` down to its first ``max_minutes`` minutes, in place.
+
+    With ``start_seconds`` (``SOURCE_START_SECONDS``: a stretch the user picked
+    in the dashboard) the cut keeps ``max_minutes`` from that point instead.
+    That cut is not idempotent, so a ``.range`` stamp next to the file records
+    it, and a resumed job finding the same file already cut leaves it alone.
 
     Set through ``MAX_SOURCE_MINUTES`` by app.py when the user accepted the
     quota wall's "clip the first N minutes" offer: only N minutes were
@@ -771,6 +784,18 @@ def cap_source_duration(input_video, max_minutes, safety=False):
         return input_video
     if secs <= 0:
         return input_video
+    try:
+        start = max(0.0, float(start_seconds or 0))
+    except (TypeError, ValueError):
+        start = 0.0
+    range_stamp = f"{input_video}.range"
+    if start > 0:
+        try:
+            with open(range_stamp) as f:
+                if json.load(f) == _file_stamp(input_video):
+                    return input_video
+        except (OSError, ValueError):
+            pass
     duration = 0.0
     try:
         cap = cv2.VideoCapture(input_video)
@@ -779,7 +804,7 @@ def cap_source_duration(input_video, max_minutes, safety=False):
         cap.release()
     except Exception:
         duration = 0.0
-    if duration and duration <= secs + (30.0 if safety else 1.0):
+    if not start and duration and duration <= secs + (30.0 if safety else 1.0):
         return input_video
     if safety and not duration:
         return input_video
@@ -790,13 +815,22 @@ def cap_source_duration(input_video, max_minutes, safety=False):
         ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "160k"],
     ]
     for codec_args in attempts:
-        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", input_video,
+        seek = ["-ss", f"{start:.3f}"] if start else []
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *seek, "-i", input_video,
                "-t", f"{secs:.3f}", *codec_args, "-movflags", "+faststart", tmp]
         try:
             subprocess.run(cmd, check=True, capture_output=True, timeout=3600)
             os.replace(tmp, input_video)
             shown = f"{int(math.ceil(duration / 60))}" if duration else "?"
-            if safety:
+            if start:
+                try:
+                    with open(range_stamp, "w") as f:
+                        json.dump(_file_stamp(input_video), f)
+                except OSError:
+                    pass
+                print(f"✂️ Clipping {start / 60:.1f}-{(start + secs) / 60:.1f} min of {shown}: "
+                      f"the part picked in the dashboard.")
+            elif safety:
                 print(f"✂️ The downloaded source runs {shown} min, longer than the "
                       f"{float(max_minutes):g} min measured and reserved at submit; "
                       f"clipping the first {float(max_minutes):g} min.")
@@ -971,6 +1005,10 @@ def download_youtube_video(url, output_dir=".", on_audio=None):
         if _raw:
             try:
                 _range_cap = float(_raw) * 60.0 + _margin
+                if _var == "MAX_SOURCE_MINUTES":
+                    # A picked stretch ends at start + length: fetch up to there
+                    # (from 0, so the exact cut afterwards keeps its offsets).
+                    _range_cap += float(os.environ.get("SOURCE_START_SECONDS", "0") or 0)
             except ValueError:
                 pass
             break
@@ -2379,7 +2417,8 @@ if __name__ == '__main__':
     # Quota-wall offer: only the first N minutes were paid for (see
     # cap_source_duration). Must run before anything reads the file.
     if os.environ.get("MAX_SOURCE_MINUTES", "").strip():
-        input_video = cap_source_duration(input_video, os.environ["MAX_SOURCE_MINUTES"])
+        input_video = cap_source_duration(input_video, os.environ["MAX_SOURCE_MINUTES"],
+                                          start_seconds=os.environ.get("SOURCE_START_SECONDS", 0))
     elif os.environ.get("SOURCE_CAP_MINUTES", "").strip():
         # Whole-video metered job: never process more than was reserved.
         def _stamp(path):
