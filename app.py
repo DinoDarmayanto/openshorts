@@ -5992,21 +5992,30 @@ async def get_social_user(request: Request):
 
     BYOK: uses the caller's key and returns all profiles on that account.
     Managed: uses the server key but returns ONLY the caller's own profile.
+    Returns structured JSON with enabled status and profiles without throwing 400/500.
     """
     api_key, forced_profile = await resolve_upload_post(request, None)
     if not api_key:
-         raise HTTPException(status_code=400, detail="Missing X-Upload-Post-Key header")
+        return {
+            "enabled": False,
+            "profiles": [],
+            "message": "Upload-Post is disabled or API key is not configured (optional)."
+        }
 
     url = "https://api.upload-post.com/api/uploadposts/users"
     print(f"🔍 Fetching User ID from: {url}")
     headers = {"Authorization": f"Apikey {api_key}"}
     
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code != 200:
-                print(f"❌ Upload-Post User Fetch Error: {resp.text}")
-                raise HTTPException(status_code=resp.status_code, detail=f"Failed to fetch user: {resp.text}")
+                print(f"⚠️ Upload-Post User Fetch Error ({resp.status_code}): {resp.text}")
+                return {
+                    "enabled": False,
+                    "profiles": [],
+                    "error": f"Upload-Post returned status {resp.status_code}"
+                }
             
             data = resp.json()
             # Never log the body: on the managed key it lists every profile
@@ -6014,7 +6023,6 @@ async def get_social_user(request: Request):
             _n = len(data.get('profiles') or []) if isinstance(data, dict) else 0
             print(f"🔍 Upload-Post users: {_n} profiles")
             
-            user_id = None
             # The structure is {'success': True, 'profiles': [{'username': '...'}, ...]}
             profiles_list = []
             if isinstance(data, dict):
@@ -6042,15 +6050,18 @@ async def get_social_user(request: Request):
             if forced_profile is not None:
                 profiles_list = [p for p in profiles_list if p.get("username") == forced_profile]
 
-            if not profiles_list:
-                # Fallback if no profiles found
-                return {"profiles": [], "error": "No profiles found"}
-
-            return {"profiles": profiles_list}
+            return {
+                "enabled": True,
+                "profiles": profiles_list
+            }
             
-            
-        except Exception as e:
-             raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        print(f"⚠️ Exception fetching Upload-Post profiles: {e}")
+        return {
+            "enabled": False,
+            "profiles": [],
+            "error": str(e)
+        }
 
 
 # --- Social analytics (thin proxies over Upload-Post) ---
@@ -6082,7 +6093,7 @@ async def _social_analytics_auth(request: Request, byok_profile: Optional[str]):
             # Signed-in free user (or no auth at all): social posting is
             # paid-only in cloud, so there are no posts to measure either.
             raise payment_required("no_plan", "Social analytics needs an active OpenShorts plan.")
-        raise HTTPException(status_code=400, detail="Missing X-Upload-Post-Key header")
+        return None, None
     if forced_profile:
         user = await _user_from_request(request)
         if user:
@@ -6092,11 +6103,14 @@ async def _social_analytics_auth(request: Request, byok_profile: Optional[str]):
 
 async def _upload_post_get(api_key: str, url: str, params: dict):
     headers = {"Authorization": f"Apikey {api_key}"}
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.get(url, headers=headers, params=params)
-    if resp.status_code != 200:
-        raise HTTPException(status_code=resp.status_code, detail=f"Vendor API Error: {resp.text}")
-    return resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, headers=headers, params=params)
+        if resp.status_code != 200:
+            return {"enabled": False, "error": f"Vendor API Error: {resp.text}"}
+        return resp.json()
+    except Exception as e:
+        return {"enabled": False, "error": str(e)}
 
 
 @app.get("/api/social/analytics")
@@ -6107,6 +6121,8 @@ async def social_profile_analytics(
 ):
     """Aggregated profile analytics: followers, views, engagement per platform."""
     api_key, profile = await _social_analytics_auth(request, user)
+    if not api_key or not profile:
+        return {"enabled": False, "data": {}, "message": "Upload-Post is not configured (optional)."}
     return await _upload_post_get(
         api_key,
         f"https://api.upload-post.com/api/analytics/{profile}",
@@ -6126,6 +6142,8 @@ async def social_post_analytics(
 ):
     """Per-post metrics for the profile's published posts (Upload-Post cache)."""
     api_key, profile = await _social_analytics_auth(request, user)
+    if not api_key or not profile:
+        return {"enabled": False, "posts": [], "message": "Upload-Post is not configured (optional)."}
     params = {"user": profile}
     for key, value in (("platform", platform), ("limit", limit),
                        ("cursor", cursor), ("since", since), ("until", until)):
@@ -6166,6 +6184,8 @@ async def social_total_impressions(
     import social_metrics
 
     api_key, profile = await _social_analytics_auth(request, user)
+    if not api_key or not profile:
+        return {"enabled": False, "total_impressions": 0, "message": "Upload-Post is not configured (optional)."}
 
     days = _PERIOD_DAYS.get(period or "", 30)
     window_start = (datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
@@ -7632,3 +7652,12 @@ async def saasshorts_voices(
         ],
         "source": "defaults",
     }
+
+
+# Standalone / Google Colab fallback:
+# If dashboard has been built into dashboard/dist, serve it directly via FastAPI
+# on the same port (8000), eliminating proxy routing issues.
+_dashboard_dist = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard", "dist")
+if os.path.exists(_dashboard_dist):
+    app.mount("/", StaticFiles(directory=_dashboard_dist, html=True), name="dashboard_static")
+

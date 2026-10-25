@@ -1091,7 +1091,27 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 title="post clip"
                 size="md"
                 footer={
-                    noAccountsConnected ? (
+                    !canPost ? (
+                        <div className="flex flex-col gap-2 w-full">
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setShowModal(false);
+                                    downloadClip();
+                                }}
+                                className="btn-primary w-full flex items-center justify-center gap-2 py-2.5 text-sm"
+                            >
+                                <Download size={16} /> Download Video Langsung (Lokal)
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setShowModal(false)}
+                                className="btn-ghost w-full py-1.5 text-xs text-muted hover:text-ink"
+                            >
+                                Batal
+                            </button>
+                        </div>
+                    ) : noAccountsConnected ? (
                         <button onClick={handleConnectAccounts} className="btn-primary w-full">
                             <Link2 size={16} /> connect accounts
                         </button>
@@ -1107,9 +1127,14 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 }
             >
                 {!canPost && (
-                    <div className="mb-4 px-3 py-2 rounded-input text-xs text-warn bg-[color-mix(in_oklab,var(--color-warn)_10%,transparent)] flex items-start gap-2">
-                        <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                        <div className="lowercase">configure api key in settings first.</div>
+                    <div className="mb-4 px-3.5 py-3 rounded-input text-xs text-ink2 bg-paper2 border border-rule flex flex-col gap-2">
+                        <div className="flex items-center gap-2 font-medium text-ink">
+                            <AlertCircle size={14} className="text-warn shrink-0" />
+                            <span>Integrasi Upload-Post Tidak Aktif (Opsional)</span>
+                        </div>
+                        <p className="text-muted leading-relaxed">
+                            Penerbitan otomatis ke media sosial membutuhkan API Key Upload-Post di Settings. Anda tetap dapat mengunduh video klip ini secara langsung ke perangkat Anda tanpa menghubungkan akun Upload-Post.
+                        </p>
                     </div>
                 )}
 

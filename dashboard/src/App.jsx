@@ -859,34 +859,48 @@ function App() {
   // silent: background auto-fetch — never alert(), just log. Managed users need
   // no local key (the server resolves its own); BYOK sends the header.
   const fetchUserProfiles = async ({ silent = false } = {}) => {
-    if (!uploadPostKey && !isManaged) return;
+    if (!uploadPostKey && !isManaged) {
+      if (!silent) alert("Upload-Post API Key belum diisi (fitur ini opsional). Anda tetap dapat membuat dan mendownload klip langsung.");
+      return;
+    }
     try {
       const res = await apiFetch('/api/social/user', {
         headers: uploadPostKey ? { 'X-Upload-Post-Key': uploadPostKey } : {}
       });
-      if (!res.ok) throw new Error("Failed to fetch");
+      if (!res.ok) {
+        if (!silent) alert("Gagal mengambil profil Upload-Post. Fitur ini bersifat opsional; pembuatan klip dan unduhan tetap berfungsi normal.");
+        return;
+      }
       const data = await res.json();
+      if (data.enabled === false) {
+        if (!silent) {
+          alert(data.message || data.error || "Integrasi Upload-Post tidak aktif (opsional). Anda dapat men-generate dan mengunduh video langsung.");
+        }
+        return;
+      }
       if (data.profiles && data.profiles.length > 0) {
         setUserProfiles(data.profiles);
         // Auto select first if none selected
         if (!uploadUserId) {
           setUploadUserId(data.profiles[0].username);
         }
+        if (!silent) {
+          alert(`Berhasil terhubung ke ${data.profiles.length} profil Upload-Post.`);
+        }
       } else if (!silent) {
-        alert("No profiles found for this API Key.");
+        alert("Tidak ada profil yang ditemukan untuk API Key ini (fitur opsional).");
       }
     } catch (e) {
-      if (!silent) alert("Error fetching User Profiles. Please check key.");
-      console.error(e);
+      if (!silent) alert("Gagal mengambil profil Upload-Post. Fitur ini bersifat opsional; Anda tetap dapat membuat dan mengunduh klip tanpa Upload-Post.");
+      console.warn("Upload-Post profile fetch error (optional):", e);
     }
   };
 
   // Hosted is paid-only (no BYOK core). Self-host uses BYOK keys.
-  // `keysMissing` now means "self-host BYOK keys missing" — it never fires on hosted.
-  // A self-hosted server running the moment picker on a local LLM
-  // (LLM_BASE_URL) does not need a Gemini key for the core pipeline.
+  // In self-host / Google Colab, ONLY Gemini (or local LLM) is strictly required to generate clips.
+  // Upload-Post is completely optional and never blocks clip generation or downloading.
   const geminiOk = !!apiKey || !!localLlm;
-  const keysMissing = !billingEnabled && (!geminiOk || !uploadPostKey);
+  const keysMissing = !billingEnabled && !geminiOk;
   const needsPlan = billingEnabled && !isManaged;   // hosted, signed-out or no active plan/trial
 
   // Fresh sign-up: Clip Generator tutorial (AuthContext set os_show_clip_tutorial
@@ -1550,17 +1564,11 @@ function App() {
               <button
                 onClick={() => (billingEnabled && !isSignedIn ? setShowLogin(true) : goToTab('settings'))}
                 className="badge-warn hover:brightness-125 transition-all hidden sm:inline-flex"
-                title="Configure API keys or choose a plan"
+                title="Configure Gemini API key"
               >
                 <AlertTriangle size={12} />
-                <span className="hidden md:inline">
-                  {!geminiOk && !uploadPostKey
-                    ? 'Gemini & Upload-Post keys missing'
-                    : !geminiOk
-                      ? 'Gemini API Key Missing'
-                      : 'Upload-Post API Key Missing'}
-                </span>
-                <span className="md:hidden">keys missing</span>
+                <span className="hidden md:inline">Gemini API Key Missing</span>
+                <span className="md:hidden">key missing</span>
               </button>
             )}
           </div>
@@ -1572,13 +1580,9 @@ function App() {
             <div className="flex items-start sm:items-center gap-2.5 sm:gap-3 text-sm text-ink2 min-w-0 flex-1">
               <KeyRound size={16} className="shrink-0 text-warn mt-0.5 sm:mt-0" />
               <div className="min-w-0">
-                <span className="font-medium text-ink">Required API keys missing.</span>{' '}
+                <span className="font-medium text-ink">Gemini API key missing.</span>{' '}
                 <span className="text-muted">
-                  {!geminiOk && !uploadPostKey
-                    ? 'Set your Gemini and Upload-Post API keys to use OpenShorts.'
-                    : !geminiOk
-                      ? 'Set your Gemini API key to use OpenShorts.'
-                      : 'Set your Upload-Post API key to use OpenShorts.'}
+                  Set your Gemini API key in Settings to generate clips.
                 </span>
               </div>
             </div>
@@ -1686,30 +1690,33 @@ function App() {
                     <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
                       <Share2 size={16} className="text-brass" />
                     </div>
-                    <h2 className="text-base font-medium text-ink lowercase">Social Integration</h2>
+                    <h2 className="text-base font-medium text-ink lowercase">Social Integration (Upload-Post)</h2>
                   </div>
-                  <span className="badge-warn">Required</span>
+                  {uploadPostKey ? (
+                    <span className="badge-ok">Configured</span>
+                  ) : (
+                    <span className="readout text-muted">Opsional / Disabled</span>
+                  )}
                 </div>
                 <p className="text-xs text-muted mb-6 leading-relaxed">
-                  Required to publish your clips to TikTok, Instagram Reels, and YouTube Shorts via <strong>Upload-Post</strong>.
-                  Includes a <strong>free tier</strong> (no credit card required).
+                  <strong>Fitur Opsional:</strong> Diperlukan hanya jika Anda ingin mempublikasikan klip secara otomatis ke TikTok, Instagram Reels, dan YouTube Shorts via <strong>Upload-Post</strong>. Jika dikosongkan, Anda tetap dapat men-generate dan mengunduh seluruh video klip secara langsung tanpa akun Upload-Post.
                 </p>
                 <div className="space-y-4">
-                  <label className="block text-sm text-muted">Upload-Post API Key</label>
+                  <label className="block text-sm text-muted">Upload-Post API Key (Opsional)</label>
                   <div className="flex flex-col sm:flex-row gap-2">
                     <input
                       type="password"
                       value={uploadPostKey}
                       onChange={(e) => setUploadPostKey(e.target.value)}
                       className="input-field"
-                      placeholder="ey..."
+                      placeholder="ey... (kosongkan jika tidak menggunakan fitur auto-publish)"
                     />
                     <button onClick={fetchUserProfiles} className="btn-quiet py-2 px-4 text-sm">
                       Connect
                     </button>
                   </div>
                   <div className="text-xs text-muted leading-relaxed">
-                    Connect your Upload-Post account to enable one-click publishing.
+                    Hubungkan akun Upload-Post Anda untuk mengaktifkan fitur penerbitan otomatis 1-klik (opsional).
                     <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
                       <a href="https://app.upload-post.com/login" target="_blank" rel="noopener noreferrer" className="p-2 border border-rule rounded-input hover:bg-paper3 transition-colors flex flex-col gap-1">
                         <span className="text-ink2 font-medium">1. Login</span>
@@ -2430,11 +2437,7 @@ function App() {
         isOpen={showKeyModal}
         onClose={() => setShowKeyModal(false)}
         eyebrow="SETUP"
-        title={!geminiOk && !uploadPostKey
-          ? 'Required API Keys Missing'
-          : !geminiOk
-            ? 'Gemini API Key Required'
-            : 'Upload-Post API Key Required'}
+        title="Gemini API Key Required"
         footer={
           <div className="flex gap-3">
             <button
@@ -2454,7 +2457,7 @@ function App() {
       >
         <div className="space-y-4">
           <p className="text-sm text-muted">
-            OpenShorts needs both a <strong className="text-ink2">Gemini</strong> API key and an <strong className="text-ink2">Upload-Post</strong> API key. Both have free tiers.
+            OpenShorts membutuhkan <strong className="text-ink2">Gemini API Key</strong> untuk men-generate momen klip dan layout video. Integrasi Upload-Post bersifat sepenuhnya opsional.
           </p>
 
           {/* Gemini block */}
@@ -2488,23 +2491,17 @@ function App() {
           {/* Upload-Post block */}
           <div className={`rounded-input p-4 space-y-2 border ${!uploadPostKey ? 'border-rule2' : 'border-rule opacity-70'}`}>
             <p className="text-xs font-medium text-ink flex items-center gap-2">
-              {uploadPostKey ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
+              {uploadPostKey ? <Check size={12} className="text-ok" /> : <span className="readout text-muted font-normal">[Opsional]</span>}
               Upload-Post API Key {uploadPostKey && <span className="text-ok">— set</span>}
             </p>
             {!uploadPostKey && (
               <>
                 <p className="text-xs text-muted">
-                  Required to publish your clips to TikTok, Instagram Reels, and YouTube Shorts. Free tier available, no credit card needed.
+                  Opsional: Hanya diperlukan jika ingin langsung mempublikasikan klip ke media sosial (TikTok, Instagram, YouTube).
                 </p>
-                <ol className="text-xs text-muted space-y-1 list-decimal list-inside">
-                  <li>Register at <a href="https://app.upload-post.com/login" target="_blank" rel="noopener noreferrer" className="text-brass underline">app.upload-post.com</a></li>
-                  <li>Connect your TikTok, Instagram, or YouTube accounts</li>
-                  <li>Go to <a href="https://app.upload-post.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-brass underline">API Keys</a> and generate one</li>
-                  <li>Paste it below</li>
-                </ol>
                 <input
                   type="text"
-                  placeholder="Paste your Upload-Post API key here..."
+                  placeholder="Paste your Upload-Post API key here (opsional)..."
                   className="input-field"
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && e.target.value.trim()) {
